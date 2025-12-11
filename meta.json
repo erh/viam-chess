@@ -1,0 +1,37 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "erh:viam-chess",
+  "visibility": "public",
+  "url": "",
+  "description": "Modular generic service: chess",
+  "models": [
+    {
+      "api": "rdk:service:generic",
+      "model": "erh:viam-chess:chess",
+      "short_description": "Provide a short (100 characters or less) description of this model here",
+      "markdown_link": "README.md#chess config"
+    },
+    {
+      "api": "rdk:service:camera",
+      "model": "erh:viam-chess:board-camera",
+      "short_description": "debugging tool mostly i think",
+      "markdown_link": "README.md#board camera config"
+    }
+
+  ],
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/viam-chess",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64",
+      "windows/amd64"
+    ]
+  }
+}
