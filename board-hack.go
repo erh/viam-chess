@@ -18,9 +18,9 @@ import (
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
-	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/services/vision"
 	viz "go.viam.com/rdk/vision"
+	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/vision/classification"
 	"go.viam.com/rdk/vision/objectdetection"
 	"go.viam.com/rdk/vision/viscapture"
@@ -124,7 +124,7 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
-			xStartOffset := int((file - 'a')) * squareSize
+			xStartOffset := int(('h' - file)) * squareSize
 			yStartOffset := (rank - 1) * squareSize
 
 			srcRect := image.Rect(
@@ -282,7 +282,7 @@ func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName 
 		if err != nil {
 			return nil, err
 		}
-
+		
 		o, err := viz.NewObjectWithLabel(pc, fmt.Sprintf("%s-%d", s.name, s.color), nil)
 		if err != nil {
 			return nil, err

@@ -17,7 +17,7 @@ func TestBoardDebugImageHack1(t *testing.T) {
 	pc, err := pointcloud.NewFromFile("data/hack1.pcd", "")
 	test.That(t, err, test.ShouldBeNil)
 
-	out, err := BoardDebugImageHack(input, pc, touch.RealSenseProperties)
+	out, _, err := BoardDebugImageHack(input, pc, touch.RealSenseProperties)
 	test.That(t, err, test.ShouldBeNil)
 
 	err = rimage.WriteImageToFile("hack-test.jpg", out)
