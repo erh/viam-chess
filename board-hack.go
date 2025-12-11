@@ -18,9 +18,9 @@ import (
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage"
+	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/services/vision"
 	viz "go.viam.com/rdk/vision"
-	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/vision/classification"
 	"go.viam.com/rdk/vision/objectdetection"
 	"go.viam.com/rdk/vision/viscapture"
@@ -105,6 +105,8 @@ type squareInfo struct {
 	file rune
 	name string // <rank><file>
 
+	originalBounds image.Rectangle
+
 	color int // 0,1,2
 
 	pc pointcloud.PointCloud
@@ -165,6 +167,7 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 				rank,
 				file,
 				name,
+				srcRect,
 				pieceColor,
 				subPc,
 			})
@@ -243,29 +246,39 @@ func (bc *BoardCameraHack) Classifications(ctx context.Context, img image.Image,
 }
 
 func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*viz.Object, error) {
+	ret, err := bc.CaptureAllFromCamera(ctx, cameraName, viscapture.CaptureOptions{}, extra)
+	if err != nil {
+		return nil, err
+	}
+	return ret.Objects, nil
+}
+
+func (bc *BoardCameraHack) CaptureAllFromCamera(ctx context.Context, cameraName string, opts viscapture.CaptureOptions, extra map[string]interface{}) (viscapture.VisCapture, error) {
+
+	ret := viscapture.VisCapture{}
 
 	ni, _, err := bc.input.Images(ctx, nil, extra)
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
 
 	pc, err := bc.input.NextPointCloud(ctx, extra)
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
 
 	if len(ni) == 0 {
-		return nil, fmt.Errorf("no images returned from input camera")
+		return ret, fmt.Errorf("no images returned from input camera")
 	}
 
-	srcImg, err := ni[0].Image(ctx)
+	ret.Image, err = ni[0].Image(ctx)
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
 
-	dst, squares, err := BoardDebugImageHack(srcImg, pc, bc.props)
+	dst, squares, err := BoardDebugImageHack(ret.Image, pc, bc.props)
 	if err != nil {
-		return nil, err
+		return ret, err
 	}
 
 	if extra["printdst"] == true {
@@ -275,30 +288,30 @@ func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName 
 		}
 	}
 
-	objs := []*viz.Object{}
+	ret.Objects = []*viz.Object{}
+	ret.Detections = []objectdetection.Detection{}
 
 	for _, s := range squares {
 		pc, err := bc.rfs.TransformPointCloud(ctx, s.pc, bc.conf.Input, "world")
 		if err != nil {
-			return nil, err
+			return ret, err
 		}
-		
-		o, err := viz.NewObjectWithLabel(pc, fmt.Sprintf("%s-%d", s.name, s.color), nil)
+
+		label := fmt.Sprintf("%s-%d", s.name, s.color)
+		o, err := viz.NewObjectWithLabel(pc, label, nil)
 		if err != nil {
-			return nil, err
+			return ret, err
 		}
-		objs = append(objs, o)
+		ret.Objects = append(ret.Objects, o)
+
+		ret.Detections = append(ret.Detections, objectdetection.NewDetectionWithoutImgBounds(s.originalBounds, 1, label))
 	}
 
-	return objs, nil
+	return ret, nil
 }
 
 func (bc *BoardCameraHack) GetProperties(ctx context.Context, extra map[string]interface{}) (*vision.Properties, error) {
 	return &vision.Properties{
 		ObjectPCDsSupported: true,
 	}, nil
-}
-
-func (bc *BoardCameraHack) CaptureAllFromCamera(ctx context.Context, cameraName string, opts viscapture.CaptureOptions, extra map[string]interface{}) (viscapture.VisCapture, error) {
-	return viscapture.VisCapture{}, fmt.Errorf("CaptureAllFromCamera not implemented")
 }

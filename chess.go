@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mitchellh/mapstructure"
-	
+
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	generic "go.viam.com/rdk/services/generic"
@@ -91,10 +91,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 
 	if cmd.Move.To != "" && cmd.Move.From != "" {
 		s.logger.Infof("move %v to %v", cmd.Move.From, cmd.Move.To)
-		
+
 		return nil, fmt.Errorf("finish me")
 	}
-	
+
 	return nil, fmt.Errorf("unknown cmd %v", cmd)
 }
 
