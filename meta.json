@@ -12,8 +12,8 @@
       "markdown_link": "README.md#chess config"
     },
     {
-      "api": "rdk:service:camera",
-      "model": "erh:viam-chess:board-camera",
+      "api": "rdk:service:vision",
+      "model": "erh:viam-chess:board-camera-hack",
       "short_description": "debugging tool mostly i think",
       "markdown_link": "README.md#board camera config"
     }

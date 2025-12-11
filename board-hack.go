@@ -14,11 +14,15 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"go.viam.com/rdk/components/camera"
-	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/rimage"
+	"go.viam.com/rdk/services/vision"
+	viz "go.viam.com/rdk/vision"
+	"go.viam.com/rdk/vision/classification"
+	"go.viam.com/rdk/vision/objectdetection"
+	"go.viam.com/rdk/vision/viscapture"
 
 	"github.com/erh/vmodutils/touch"
 )
@@ -28,8 +32,8 @@ var BoardCameraHackModel = family.WithModel("board-camera-hack")
 const minPieceSize = 20.0
 
 func init() {
-	resource.RegisterComponent(camera.API, BoardCameraHackModel,
-		resource.Registration[camera.Camera, *BoardCameraHackConfig]{
+	resource.RegisterService(vision.API, BoardCameraHackModel,
+		resource.Registration[vision.Service, *BoardCameraHackConfig]{
 			Constructor: newBoardHackCamera,
 		},
 	)
@@ -46,7 +50,7 @@ func (cfg *BoardCameraHackConfig) Validate(path string) ([]string, []string, err
 	return []string{cfg.Input}, nil, nil
 }
 
-func newBoardHackCamera(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (camera.Camera, error) {
+func newBoardHackCamera(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (vision.Service, error) {
 	conf, err := resource.NativeConfig[*BoardCameraHackConfig](rawConf)
 	if err != nil {
 		return nil, err
@@ -55,7 +59,7 @@ func newBoardHackCamera(ctx context.Context, deps resource.Dependencies, rawConf
 	return NewBoardCameraHack(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
-func NewBoardCameraHack(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *BoardCameraHackConfig, logger logging.Logger) (camera.Camera, error) {
+func NewBoardCameraHack(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *BoardCameraHackConfig, logger logging.Logger) (vision.Service, error) {
 	var err error
 
 	bc := &BoardCameraHack{
@@ -69,7 +73,7 @@ func NewBoardCameraHack(ctx context.Context, deps resource.Dependencies, name re
 		return nil, err
 	}
 
-	bc.props, err = bc.Properties(ctx)
+	bc.props, err = bc.input.Properties(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,43 +93,17 @@ type BoardCameraHack struct {
 	props camera.Properties
 }
 
-func (bc *BoardCameraHack) Image(ctx context.Context, mimeType string, extra map[string]interface{}) ([]byte, camera.ImageMetadata, error) {
-	return camera.GetImageFromGetImages(ctx, nil, bc, extra, nil)
+type squareInfo struct {
+	rank int
+	file rune
+	name string // <rank><file>
+
+	color int // 0,1,2
+
+	pc pointcloud.PointCloud
 }
 
-func (bc *BoardCameraHack) Images(ctx context.Context, filterSourceNames []string, extra map[string]interface{}) ([]camera.NamedImage, resource.ResponseMetadata, error) {
-	ni, rm, err := bc.input.Images(ctx, nil, extra)
-	if err != nil {
-		return nil, rm, err
-	}
-
-	pc, err := bc.input.NextPointCloud(ctx, extra)
-	if err != nil {
-		return nil, rm, err
-	}
-
-	if len(ni) == 0 {
-		return nil, rm, fmt.Errorf("no images returned from input camera")
-	}
-
-	srcImg, err := ni[0].Image(ctx)
-	if err != nil {
-		return nil, rm, err
-	}
-
-	dst, err := BoardDebugImageHack(srcImg, pc, bc.props)
-	if err != nil {
-		return nil, rm, err
-	}
-
-	result, err := camera.NamedImageFromImage(dst, ni[0].SourceName, "", data.Annotations{})
-	if err != nil {
-		return nil, rm, err
-	}
-	return []camera.NamedImage{result}, rm, nil
-}
-
-func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties) (image.Image, error) {
+func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties) (image.Image, []squareInfo, error) {
 	dst := image.NewRGBA(image.Rect(0, 0, srcImg.Bounds().Max.Y, srcImg.Bounds().Max.Y))
 
 	xOffset := (srcImg.Bounds().Max.X - srcImg.Bounds().Max.Y) / 2
@@ -134,6 +112,8 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 
 	fmt.Printf("eliot %v -> %v squareSize: %d xOffset: %d\n", srcImg.Bounds(), dst.Bounds(), squareSize, xOffset)
 	fmt.Printf("md: %v %v\n", pc.MetaData().MinZ, pc.MetaData().MaxZ)
+
+	squares := []squareInfo{}
 
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
@@ -156,7 +136,7 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 
 			subPc, err := touch.PCLimitToImageBoxes(pc, []*image.Rectangle{&srcRect}, nil, props)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 
 			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
@@ -173,10 +153,18 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 			textX := dstRect.Min.X + squareSize/2 - len(name)*3
 			textY := dstRect.Min.Y + squareSize/2 + 3
 			drawString(dst, textX, textY, name+"-"+meta, color.RGBA{255, 0, 0, 255})
+
+			squares = append(squares, squareInfo{
+				rank,
+				file,
+				name,
+				pieceColor,
+				subPc,
+			})
 		}
 	}
 
-	return dst, nil
+	return dst, squares, nil
 }
 
 // 0 - blank, 1 - white, 2 - black
@@ -227,18 +215,81 @@ func (bc *BoardCameraHack) DoCommand(ctx context.Context, cmd map[string]interfa
 	return nil, fmt.Errorf("DoCommand not supported")
 }
 
-func (bc *BoardCameraHack) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
-	return nil, fmt.Errorf("NextPointCloud not supported")
-}
-
-func (bc *BoardCameraHack) Properties(ctx context.Context) (camera.Properties, error) {
-	return camera.Properties{}, nil
-}
-
-func (bc *BoardCameraHack) Geometries(ctx context.Context, extra map[string]interface{}) ([]spatialmath.Geometry, error) {
-	return nil, nil
-}
-
 func (bc *BoardCameraHack) Name() resource.Name {
 	return bc.name
+}
+
+func (bc *BoardCameraHack) DetectionsFromCamera(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+	return nil, fmt.Errorf("DetectionsFromCamera not implemented")
+}
+
+func (bc *BoardCameraHack) Detections(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+	return nil, fmt.Errorf("Detections not implemented")
+}
+
+func (bc *BoardCameraHack) ClassificationsFromCamera(ctx context.Context, cameraName string, n int, extra map[string]interface{}) (classification.Classifications, error) {
+	return nil, fmt.Errorf("ClassificationsFromCamera not implemented")
+}
+
+func (bc *BoardCameraHack) Classifications(ctx context.Context, img image.Image, n int, extra map[string]interface{}) (classification.Classifications, error) {
+	return nil, fmt.Errorf("Classifications not implemented")
+}
+
+func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*viz.Object, error) {
+
+	ni, _, err := bc.input.Images(ctx, nil, extra)
+	if err != nil {
+		return nil, err
+	}
+
+	pc, err := bc.input.NextPointCloud(ctx, extra)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ni) == 0 {
+		return nil, fmt.Errorf("no images returned from input camera")
+	}
+
+	srcImg, err := ni[0].Image(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	dst, squares, err := BoardDebugImageHack(srcImg, pc, bc.props)
+	if err != nil {
+		return nil, err
+	}
+
+	if extra["printdst"] == true {
+		err := rimage.WriteImageToFile("hack-test.jpg", dst)
+		if err != nil {
+			bc.logger.Warnf("Writing file failed: %v", err)
+		}
+	}
+
+	objs := []*viz.Object{}
+
+	for _, s := range squares {
+		if s.color == 0 {
+			continue
+		}
+		o, err := viz.NewObjectWithLabel(s.pc, fmt.Sprintf("%s-%d", s.name, s.color), nil)
+		if err != nil {
+			return nil, err
+		}
+		objs = append(objs, o)
+	}
+
+	return objs, nil
+}
+
+func (bc *BoardCameraHack) GetProperties(ctx context.Context, extra map[string]interface{}) (*vision.Properties, error) {
+	return &vision.Properties{
+		ObjectPCDsSupported: true,
+	}, nil
+}
+
+func (bc *BoardCameraHack) CaptureAllFromCamera(ctx context.Context, cameraName string, opts viscapture.CaptureOptions, extra map[string]interface{}) (viscapture.VisCapture, error) {
+	return viscapture.VisCapture{}, fmt.Errorf("CaptureAllFromCamera not implemented")
 }
