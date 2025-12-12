@@ -56,6 +56,15 @@ type ChessConfig struct {
 	Gripper string
 
 	PoseStart string `json:"pose-start"`
+
+	Engine string
+}
+
+func (cfg *ChessConfig) engine() string {
+	if cfg.Engine == "" {
+		return "stockfish"
+	}
+	return cfg.Engine
 }
 
 func (cfg *ChessConfig) Validate(path string) ([]string, []string, error) {
@@ -164,7 +173,7 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	s.fenFile = os.Getenv("VIAM_MODULE_DATA") + "state.json"
 	s.logger.Infof("fenFile: %v", s.fenFile)
-	s.engine, err = uci.New("stockfish")
+	s.engine, err = uci.New(conf.engine())
 	if err != nil {
 		return nil, err
 	}
