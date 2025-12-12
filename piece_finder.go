@@ -303,6 +303,7 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 
 		highPoint := touch.PCFindHighestInRegion(pc, image.Rect(-1000, -1000, 1000, 1000))
 		highX, highY := bc.props.IntrinsicParams.PointToPixel(highPoint.X, highPoint.Y, highPoint.Z)
+		bc.logger.Infof("highPoint: %v high (x,y): %0.2f %0.2f", highPoint, highX, highY)
 		ret.Detections = append(ret.Detections,
 			objectdetection.NewDetectionWithoutImgBounds(
 				image.Rect(
