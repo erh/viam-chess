@@ -304,7 +304,6 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		lowPoint := touch.PCFindLowestInRegion(s.pc, image.Rect(-10000, -10000, 10000, 10000))
 
 		lowX, lowY := bc.props.IntrinsicParams.PointToPixel(lowPoint.X, lowPoint.Y, lowPoint.Z)
-		bc.logger.Infof("lowPoint: %v low (x,y): %0.2f %0.2f", lowPoint, lowX, lowY)
 
 		ret.Detections = append(ret.Detections,
 			objectdetection.NewDetectionWithoutImgBounds(
