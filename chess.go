@@ -788,7 +788,32 @@ func (s *viamChessChess) checkPositionForMoves(ctx context.Context) error {
 		return nil
 	}
 
-	if len(differnces) != 2 {
+	if len(differnces) == 4 {
+		// is this a castle??
+		if squaresSame(differnces, []chess.Square{chess.E1, chess.F1, chess.G1, chess.H1}) {
+			// white king castle
+			from = chess.E1
+			to = chess.G1
+			differnces = nil
+		} else if squaresSame(differnces, []chess.Square{chess.E1, chess.A1, chess.C1, chess.D1}) {
+			// white queen castle
+			from = chess.E1
+			to = chess.C1
+			differnces = nil
+		} else if squaresSame(differnces, []chess.Square{chess.E8, chess.F8, chess.G8, chess.H8}) {
+			// black king castle
+			from = chess.E8
+			to = chess.G8
+			differnces = nil
+		} else if squaresSame(differnces, []chess.Square{chess.E8, chess.A8, chess.C8, chess.D8}) {
+			// black queen castle
+			from = chess.E8
+			to = chess.C8
+			differnces = nil
+		}
+	}
+
+	if len(differnces) != 2 && len(differnces) != 0 {
 		return fmt.Errorf("bad number of differnces (%d) : %v", len(differnces), differnces)
 	}
 
@@ -864,4 +889,25 @@ func (s *viamChessChess) centerCamera(ctx context.Context) error {
 		*/
 
 	}
+}
+
+func squaresSame(a, b []chess.Square) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	// Check that every element in a exists in b
+	for _, sq := range a {
+		found := false
+		for _, sq2 := range b {
+			if sq == sq2 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
