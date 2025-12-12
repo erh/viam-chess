@@ -86,6 +86,8 @@ type viamChessChess struct {
 
 	motion motion.Service
 	rfs    framesystem.Service
+
+	startPose *referenceframe.PoseInFrame
 }
 
 func newViamChessChess(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -130,10 +132,6 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	if err != nil {
 		return nil, err
 	}
-	err = s.goToStart(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	s.motion, err = motion.FromDependencies(deps, "builtin")
 	if err != nil {
@@ -143,6 +141,11 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	s.rfs, err = framesystem.FromDependencies(deps)
 	if err != nil {
 		logger.Errorf("can't find framesystem: %v", err)
+	}
+
+	err = s.goToStart(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	return s, nil
@@ -218,43 +221,56 @@ func (s *viamChessChess) findDetection(data viscapture.VisCapture, pos string) o
 	return nil
 }
 
+func (s *viamChessChess) getCenterFor(data viscapture.VisCapture, pos string) (r3.Vector, error) {
+	if pos == "-" {
+		return r3.Vector{400, 400, 400}, nil
+	}
+
+	o := s.findObject(data, pos)
+	if o == nil {
+		return r3.Vector{}, fmt.Errorf("can't find object for: %s", pos)
+	}
+
+	if strings.HasSuffix(o.Geometry.Label(), "-0") {
+		md := o.MetaData()
+		return md.Center(), nil
+	}
+
+	return touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000)), nil
+}
+
 func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCapture, from, to string) error {
-	startPose, err := s.rfs.GetPose(ctx, s.conf.Gripper, "world", nil, nil)
-	if err != nil {
-		return err
+	s.logger.Infof("movePiece called: %s -> %s", from, to)
+	if to != "-" { // check where we're going
+		o := s.findObject(data, to)
+		if o == nil {
+			return fmt.Errorf("can't find object for: %s", to)
+		}
+
+		if !strings.HasSuffix(o.Geometry.Label(), "-0") {
+			s.logger.Infof("position %s already has a piece (%s), will move", to, o.Geometry.Label())
+			err := s.movePiece(ctx, data, to, "-")
+			if err != nil {
+				return fmt.Errorf("can't move piece out of the way: %w", err)
+			}
+		}
 	}
 
 	useZ := 100.0
 
 	{
-		o := s.findObject(data, from)
-		if o == nil {
-			return fmt.Errorf("can't find object for: %s", from)
+		center, err := s.getCenterFor(data, from)
+		if err != nil {
+			return err
 		}
-
-		center := touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000))
 		useZ = center.Z
 
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, safeZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
 		if err != nil {
 			return err
 		}
 
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, useZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, useZ})
 		if err != nil {
 			return err
 		}
@@ -267,67 +283,37 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 			return fmt.Errorf("Grab didn't grab")
 		}
 
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, safeZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
 		if err != nil {
 			return err
 		}
 	}
 
-	// ------
-
 	{
-		o2 := s.findObject(data, to)
-		if o2 == nil {
-			return fmt.Errorf("can't find object for: %s", to)
-		}
-
-		md := o2.MetaData()
-		center := md.Center()
-
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, safeZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		center, err := s.getCenterFor(data, to)
 		if err != nil {
 			return err
 		}
 
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, useZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
 		if err != nil {
 			return err
 		}
 
-		err := s.setupGripper(ctx)
+		if to == "-" { // TODO: temp hack
+			useZ = 300
+		}
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, useZ})
 		if err != nil {
 			return err
 		}
 
-		_, err = s.motion.Move(ctx, motion.MoveReq{
-			ComponentName: s.conf.Gripper,
-			Destination: referenceframe.NewPoseInFrame("world",
-				spatialmath.NewPose(
-					r3.Vector{center.X, center.Y, safeZ},
-					startPose.Pose().Orientation(),
-				)),
-		})
+		err = s.setupGripper(ctx)
+		if err != nil {
+			return err
+		}
+
+		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
 		if err != nil {
 			return err
 		}
@@ -347,10 +333,40 @@ func (s *viamChessChess) goToStart(ctx context.Context) error {
 	}
 
 	time.Sleep(time.Second)
+
+	s.startPose, err = s.rfs.GetPose(ctx, s.conf.Gripper, "world", nil, nil)
+	if err != nil {
+		return err
+	}
+
+	s.logger.Infof("startPose: %v", s.startPose)
+
 	return nil
 }
 
 func (s *viamChessChess) setupGripper(ctx context.Context) error {
 	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": 450})
+	return err
+}
+
+func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
+
+	orientation := &spatialmath.OrientationVectorDegrees{
+		OZ:    -1,
+		Theta: s.startPose.Pose().Orientation().OrientationVectorDegrees().Theta,
+	}
+
+	if p.X > 300 {
+		orientation.OX = (p.X - 300) / 1000
+	}
+
+	_, err := s.motion.Move(ctx, motion.MoveReq{
+		ComponentName: s.conf.Gripper,
+		Destination: referenceframe.NewPoseInFrame("world",
+			spatialmath.NewPose(
+				p,
+				orientation,
+			)),
+	})
 	return err
 }
