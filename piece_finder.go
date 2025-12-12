@@ -30,7 +30,7 @@ import (
 
 var PieceFinderModel = family.WithModel("piece-finder")
 
-const minPieceSize = 20.0
+const minPieceSize = 25.0
 
 func init() {
 	resource.RegisterService(vision.API, PieceFinderModel,
