@@ -77,7 +77,7 @@ func realMain() error {
 	switch *cmd {
 	case "move":
 		res, err := thing.DoCommand(ctx, map[string]interface{}{
-			"move": map[string]interface{}{"from": *from, "to": *to},
+			"move": map[string]interface{}{"from": *from, "to": *to, "n": *n},
 		})
 		if err != nil {
 			return err

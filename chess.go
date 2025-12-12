@@ -184,6 +184,7 @@ func (s *viamChessChess) Name() resource.Name {
 
 type MoveCmd struct {
 	From, To string
+	N        int
 }
 
 type cmdStruct struct {
@@ -210,14 +211,25 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 	if cmd.Move.To != "" && cmd.Move.From != "" {
 		s.logger.Infof("move %v to %v", cmd.Move.From, cmd.Move.To)
 
-		all, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil)
-		if err != nil {
-			return nil, err
-		}
+		for x := range cmd.Move.N {
+			err := s.goToStart(ctx)
+			if err != nil {
+				return nil, err
+			}
 
-		err = s.movePiece(ctx, all, cmd.Move.From, cmd.Move.To)
-		if err != nil {
-			return nil, err
+			from, to := cmd.Move.From, cmd.Move.To
+			if x%2 == 1 {
+				to, from = from, to
+			}
+			all, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			err = s.movePiece(ctx, all, from, to)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		return nil, nil
@@ -405,8 +417,6 @@ func (s *viamChessChess) goToStart(ctx context.Context) error {
 		return err
 	}
 
-	s.logger.Infof("startPose: %v", s.startPose)
-
 	return nil
 }
 
@@ -525,12 +535,24 @@ func (s *viamChessChess) myGrab(ctx context.Context) (bool, error) {
 		return false, err
 	}
 
+	time.Sleep(300 * time.Millisecond)
+
 	res, err := s.arm.DoCommand(ctx, map[string]interface{}{"get_gripper": true})
 	if err != nil {
 		return false, err
 	}
 
-	s.logger.Infof("got: %v res: %v", got, res)
+	p, ok := res["gripper_position"].(float64)
+	if !ok {
+		return false, fmt.Errorf("Why is get_gripper weird %v", res)
+	}
+
+	s.logger.Debugf("gripper res: %v", res)
+
+	if p < 20 && got {
+		s.logger.Warnf("grab said we got, but i think no res: %v", res)
+		return false, nil
+	}
 
 	return got, nil
 }
