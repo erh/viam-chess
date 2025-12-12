@@ -3,10 +3,16 @@
 ## chess config
 ```json
 {
+	"piece-finder" : "piece-finder",
+	"arm" : "arm",
+	"gripper" : "gripper",
+
+	"pose-start" : "<pose>"
+
 }
 ```
 
-## board camera hack config
+## piece finder
 ```json
 {
     "input" : "<cropped-camera>"

@@ -10,7 +10,7 @@ import (
 	"github.com/erh/vmodutils/touch"
 )
 
-func TestBoardDebugImageHack1(t *testing.T) {
+func TestPieceFinder1(t *testing.T) {
 	input, err := rimage.ReadImageFromFile("data/hack1.jpg")
 	test.That(t, err, test.ShouldBeNil)
 

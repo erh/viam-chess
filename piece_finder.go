@@ -28,42 +28,42 @@ import (
 	"github.com/erh/vmodutils/touch"
 )
 
-var BoardCameraHackModel = family.WithModel("board-camera-hack")
+var PieceFinderModel = family.WithModel("piece-finder")
 
 const minPieceSize = 20.0
 
 func init() {
-	resource.RegisterService(vision.API, BoardCameraHackModel,
-		resource.Registration[vision.Service, *BoardCameraHackConfig]{
-			Constructor: newBoardHackCamera,
+	resource.RegisterService(vision.API, PieceFinderModel,
+		resource.Registration[vision.Service, *PieceFinderConfig]{
+			Constructor: newPieceFinder,
 		},
 	)
 }
 
-type BoardCameraHackConfig struct {
+type PieceFinderConfig struct {
 	Input string // this is the cropped camera for the board, TODO: what orientation???
 }
 
-func (cfg *BoardCameraHackConfig) Validate(path string) ([]string, []string, error) {
+func (cfg *PieceFinderConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Input == "" {
 		return nil, nil, fmt.Errorf("need an input")
 	}
 	return []string{cfg.Input}, nil, nil
 }
 
-func newBoardHackCamera(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (vision.Service, error) {
-	conf, err := resource.NativeConfig[*BoardCameraHackConfig](rawConf)
+func newPieceFinder(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (vision.Service, error) {
+	conf, err := resource.NativeConfig[*PieceFinderConfig](rawConf)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewBoardCameraHack(ctx, deps, rawConf.ResourceName(), conf, logger)
+	return NewPieceFinder(ctx, deps, rawConf.ResourceName(), conf, logger)
 }
 
-func NewBoardCameraHack(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *BoardCameraHackConfig, logger logging.Logger) (vision.Service, error) {
+func NewPieceFinder(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *PieceFinderConfig, logger logging.Logger) (vision.Service, error) {
 	var err error
 
-	bc := &BoardCameraHack{
+	bc := &PieceFinder{
 		name:   name,
 		conf:   conf,
 		logger: logger,
@@ -87,12 +87,12 @@ func NewBoardCameraHack(ctx context.Context, deps resource.Dependencies, name re
 	return bc, nil
 }
 
-type BoardCameraHack struct {
+type PieceFinder struct {
 	resource.AlwaysRebuild
 	resource.TriviallyCloseable
 
 	name   resource.Name
-	conf   *BoardCameraHackConfig
+	conf   *PieceFinderConfig
 	logger logging.Logger
 
 	rfs   framesystem.Service
@@ -221,31 +221,31 @@ func drawString(dst *image.RGBA, x, y int, s string, c color.Color) {
 	d.DrawString(s)
 }
 
-func (bc *BoardCameraHack) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (bc *PieceFinder) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("DoCommand not supported")
 }
 
-func (bc *BoardCameraHack) Name() resource.Name {
+func (bc *PieceFinder) Name() resource.Name {
 	return bc.name
 }
 
-func (bc *BoardCameraHack) DetectionsFromCamera(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+func (bc *PieceFinder) DetectionsFromCamera(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 	return nil, fmt.Errorf("DetectionsFromCamera not implemented")
 }
 
-func (bc *BoardCameraHack) Detections(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+func (bc *PieceFinder) Detections(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 	return nil, fmt.Errorf("Detections not implemented")
 }
 
-func (bc *BoardCameraHack) ClassificationsFromCamera(ctx context.Context, cameraName string, n int, extra map[string]interface{}) (classification.Classifications, error) {
+func (bc *PieceFinder) ClassificationsFromCamera(ctx context.Context, cameraName string, n int, extra map[string]interface{}) (classification.Classifications, error) {
 	return nil, fmt.Errorf("ClassificationsFromCamera not implemented")
 }
 
-func (bc *BoardCameraHack) Classifications(ctx context.Context, img image.Image, n int, extra map[string]interface{}) (classification.Classifications, error) {
+func (bc *PieceFinder) Classifications(ctx context.Context, img image.Image, n int, extra map[string]interface{}) (classification.Classifications, error) {
 	return nil, fmt.Errorf("Classifications not implemented")
 }
 
-func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*viz.Object, error) {
+func (bc *PieceFinder) GetObjectPointClouds(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*viz.Object, error) {
 	ret, err := bc.CaptureAllFromCamera(ctx, cameraName, viscapture.CaptureOptions{}, extra)
 	if err != nil {
 		return nil, err
@@ -253,7 +253,7 @@ func (bc *BoardCameraHack) GetObjectPointClouds(ctx context.Context, cameraName 
 	return ret.Objects, nil
 }
 
-func (bc *BoardCameraHack) CaptureAllFromCamera(ctx context.Context, cameraName string, opts viscapture.CaptureOptions, extra map[string]interface{}) (viscapture.VisCapture, error) {
+func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName string, opts viscapture.CaptureOptions, extra map[string]interface{}) (viscapture.VisCapture, error) {
 
 	ret := viscapture.VisCapture{}
 
@@ -310,7 +310,7 @@ func (bc *BoardCameraHack) CaptureAllFromCamera(ctx context.Context, cameraName 
 	return ret, nil
 }
 
-func (bc *BoardCameraHack) GetProperties(ctx context.Context, extra map[string]interface{}) (*vision.Properties, error) {
+func (bc *PieceFinder) GetProperties(ctx context.Context, extra map[string]interface{}) (*vision.Properties, error) {
 	return &vision.Properties{
 		ObjectPCDsSupported: true,
 	}, nil

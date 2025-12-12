@@ -43,9 +43,9 @@ func init() {
 
 type ChessConfig struct {
 	PieceFinder string `json:"piece-finder"`
-	Arm         string
-	Gripper     string
-	Motion      string
+
+	Arm     string
+	Gripper string
 
 	PoseStart string `json:"pose-start"`
 }

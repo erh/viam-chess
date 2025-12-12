@@ -10,6 +10,6 @@ import (
 
 func main() {
 
-	module.ModularMain(resource.APIModel{vision.API, viamchess.BoardCameraHackModel})
+	module.ModularMain(resource.APIModel{vision.API, viamchess.PieceFinderModel})
 	module.ModularMain(resource.APIModel{generic.API, viamchess.ChessModel})
 }

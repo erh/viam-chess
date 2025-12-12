@@ -13,9 +13,9 @@
     },
     {
       "api": "rdk:service:vision",
-      "model": "erh:viam-chess:board-camera-hack",
+      "model": "erh:viam-chess:piece-finder",
       "short_description": "debugging tool mostly i think",
-      "markdown_link": "README.md#board-camera-hack-config"
+      "markdown_link": "README.md#piece-finder-config"
     }
 
   ],
