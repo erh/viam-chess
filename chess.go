@@ -330,6 +330,11 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 		}
 		useZ = center.Z
 
+		err = s.setupGripper(ctx)
+		if err != nil {
+			return err
+		}
+
 		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
 		if err != nil {
 			return err
@@ -405,7 +410,7 @@ func (s *viamChessChess) goToStart(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = s.setupGripper(ctx)
+	err = s.gripper.Open(ctx, nil)
 	if err != nil {
 		return err
 	}
