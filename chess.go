@@ -192,6 +192,7 @@ type cmdStruct struct {
 	Move  MoveCmd
 	Go    int
 	Reset bool
+	Wipe  bool
 }
 
 func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interface{}) (map[string]interface{}, error) {
@@ -256,6 +257,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 
 	if cmd.Reset {
 		return nil, s.resetBoard(ctx)
+	}
+
+	if cmd.Wipe {
+		return nil, s.wipe(ctx)
 	}
 
 	return nil, fmt.Errorf("bad cmd %v", cmdMap)
@@ -715,6 +720,10 @@ func (s *viamChessChess) resetBoard(ctx context.Context) error {
 		}
 	}
 
+	return s.wipe(ctx)
+}
+
+func (s *viamChessChess) wipe(ctx context.Context) error {
 	return os.Remove(s.fenFile)
 }
 
