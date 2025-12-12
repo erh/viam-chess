@@ -220,7 +220,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			return nil, err
 		}
 
-		return nil, fmt.Errorf("finish me")
+		return nil, nil
 	}
 
 	if cmd.Go > 0 {
@@ -277,12 +277,19 @@ func (s *viamChessChess) getCenterFor(data viscapture.VisCapture, pos string) (r
 		return r3.Vector{}, fmt.Errorf("can't find object for: %s", pos)
 	}
 
+	md := o.MetaData()
+	center := md.Center()
+
 	if strings.HasSuffix(o.Geometry.Label(), "-0") {
-		md := o.MetaData()
-		return md.Center(), nil
+		return center, nil
 	}
 
-	return touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000)), nil
+	high := touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000))
+	return r3.Vector{
+		X: (center.X + high.X) / 2,
+		Y: (center.Y + high.Y) / 2,
+		Z: high.Z,
+	}, nil
 }
 
 func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCapture, from, to string) error {
@@ -322,7 +329,7 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 				return err
 			}
 
-			got, err := s.gripper.Grab(ctx, nil)
+			got, err := s.myGrab(ctx)
 			if err != nil {
 				return err
 			}
@@ -404,7 +411,7 @@ func (s *viamChessChess) goToStart(ctx context.Context) error {
 }
 
 func (s *viamChessChess) setupGripper(ctx context.Context) error {
-	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": 450})
+	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": 450.0})
 	return err
 }
 
@@ -510,4 +517,20 @@ func (s *viamChessChess) makeAMove(ctx context.Context) (*chess.Move, error) {
 	}
 
 	return m, nil
+}
+
+func (s *viamChessChess) myGrab(ctx context.Context) (bool, error) {
+	got, err := s.gripper.Grab(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+
+	res, err := s.arm.DoCommand(ctx, map[string]interface{}{"get_gripper": true})
+	if err != nil {
+		return false, err
+	}
+
+	s.logger.Infof("got: %v res: %v", got, res)
+
+	return got, nil
 }
