@@ -306,10 +306,18 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 			return ret, err
 		}
 
+		if pc == nil {
+			return ret, fmt.Errorf("why is pc nil")
+		}
+		
 		label := fmt.Sprintf("%s-%d", s.name, s.color)
 		o, err := viz.NewObjectWithLabel(pc, label, nil)
 		if err != nil {
 			return ret, err
+		}
+		bc.logger.Infof("eliot: %v %#v", o, o)
+		if o.Geometry == nil {
+			return ret, fmt.Errorf("why is Geometry nil for square: %s %v", s.name, s)
 		}
 		ret.Objects = append(ret.Objects, o)
 

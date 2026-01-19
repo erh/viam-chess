@@ -8,6 +8,8 @@ import (
 	"image/color"
 	"image/jpeg"
 
+	"github.com/golang/geo/r3"
+
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/gostream"
@@ -128,18 +130,122 @@ func (c *BoardFinderCam) Stream(ctx context.Context, errHandlers ...gostream.Err
 }
 
 func (c *BoardFinderCam) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
-	// todo
-	// get both the image and pointcloud
-	// find the corners
-	// project the corners onto the pointcloud
-	// crop the pointcloud to points that are within the square and directly above it.
-	return nil, fmt.Errorf("point cloud not supported")
+	// Get the pointcloud from the source camera
+	pc, err := c.source.NextPointCloud(ctx, extra)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pointcloud from source: %w", err)
+	}
+
+	// Get the image and find corners
+	imgs, _, err := c.source.Images(ctx, nil, extra)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get images from source: %w", err)
+	}
+
+	if len(imgs) == 0 {
+		return nil, fmt.Errorf("no images from source camera")
+	}
+
+	srcImg, err := imgs[0].Image(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode image: %w", err)
+	}
+
+	// Find the board corners
+	corners, err := findBoard(srcImg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find board: %w", err)
+	}
+
+	if len(corners) != 4 {
+		return nil, fmt.Errorf("expected 4 corners, got %d", len(corners))
+	}
+
+	// Get camera properties for projection
+	props, err := c.source.Properties(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get camera properties: %w", err)
+	}
+
+	if props.IntrinsicParams == nil {
+		return nil, fmt.Errorf("camera does not have intrinsic parameters")
+	}
+
+	// Filter the pointcloud to only include points that project within the board quadrilateral
+	filtered, err := filterPointCloudToQuadrilateral(pc, corners, props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter pointcloud: %w", err)
+	}
+
+	return filtered, nil
+}
+
+// filterPointCloudToQuadrilateral filters a pointcloud to only include points
+// that project to within the given quadrilateral in image space
+func filterPointCloudToQuadrilateral(pc pointcloud.PointCloud, corners []image.Point, props camera.Properties) (pointcloud.PointCloud, error) {
+	// Create a new pointcloud to hold filtered points
+	filtered := pointcloud.NewBasicEmpty()
+
+	// Convert corners to float64 for point-in-polygon test
+	polygon := make([]point, 4)
+	for i, c := range corners {
+		polygon[i] = point{float64(c.X), float64(c.Y)}
+	}
+
+	// Iterate through all points in the source pointcloud
+	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		// Project the 3D point to 2D image coordinates
+		imgX, imgY := props.IntrinsicParams.PointToPixel(p.X, p.Y, p.Z)
+
+		// Check if the projected point is inside the board quadrilateral
+		if pointInPolygon(imgX, imgY, polygon) {
+			// Add the point to the filtered pointcloud
+			if d != nil {
+				filtered.Set(p, d)
+			} else {
+				filtered.Set(p, nil)
+			}
+		}
+		return true
+	})
+
+	return filtered, nil
+}
+
+// pointInPolygon checks if a point (x, y) is inside a polygon using ray casting algorithm
+func pointInPolygon(x, y float64, polygon []point) bool {
+	n := len(polygon)
+	inside := false
+
+	j := n - 1
+	for i := 0; i < n; i++ {
+		xi, yi := polygon[i].x, polygon[i].y
+		xj, yj := polygon[j].x, polygon[j].y
+
+		if ((yi > y) != (yj > y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi) {
+			inside = !inside
+		}
+		j = i
+	}
+
+	return inside
 }
 
 func (c *BoardFinderCam) Properties(ctx context.Context) (camera.Properties, error) {
+	// Get source camera properties for intrinsics
+	srcProps, err := c.source.Properties(ctx)
+	if err != nil {
+		return camera.Properties{
+			SupportsPCD: false,
+			ImageType:   camera.ColorStream,
+		}, nil
+	}
+
 	return camera.Properties{
-		SupportsPCD: false,
-		ImageType:   camera.ColorStream,
+		SupportsPCD:      srcProps.SupportsPCD,
+		ImageType:        camera.ColorStream,
+		IntrinsicParams:  srcProps.IntrinsicParams,
+		DistortionParams: srcProps.DistortionParams,
 	}, nil
 }
 
