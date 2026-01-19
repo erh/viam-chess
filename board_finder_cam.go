@@ -171,8 +171,8 @@ func (c *BoardFinderCam) NextPointCloud(ctx context.Context, extra map[string]in
 		return nil, fmt.Errorf("camera does not have intrinsic parameters")
 	}
 
-	// Filter the pointcloud to only include points that project within the board quadrilateral
-	filtered, err := filterPointCloudToQuadrilateral(pc, corners, props)
+	// Filter and transform the pointcloud so coordinates match the transformed image
+	filtered, err := filterAndTransformPointCloud(pc, corners, c.outputSize, props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter pointcloud: %w", err)
 	}
@@ -180,10 +180,10 @@ func (c *BoardFinderCam) NextPointCloud(ctx context.Context, extra map[string]in
 	return filtered, nil
 }
 
-// filterPointCloudToQuadrilateral filters a pointcloud to only include points
-// that project to within the given quadrilateral in image space
-func filterPointCloudToQuadrilateral(pc pointcloud.PointCloud, corners []image.Point, props camera.Properties) (pointcloud.PointCloud, error) {
-	// Create a new pointcloud to hold filtered points
+// filterAndTransformPointCloud filters a pointcloud to the board region and transforms
+// the 3D coordinates so that when projected with the intrinsics, they land at the
+// corresponding positions in the perspective-transformed image.
+func filterAndTransformPointCloud(pc pointcloud.PointCloud, corners []image.Point, outputSize int, props camera.Properties) (pointcloud.PointCloud, error) {
 	filtered := pointcloud.NewBasicEmpty()
 
 	// Convert corners to float64 for point-in-polygon test
@@ -192,19 +192,54 @@ func filterPointCloudToQuadrilateral(pc pointcloud.PointCloud, corners []image.P
 		polygon[i] = point{float64(c.X), float64(c.Y)}
 	}
 
-	// Iterate through all points in the source pointcloud
+	// Source corners (original image coordinates)
+	srcPts := []point{
+		{float64(corners[0].X), float64(corners[0].Y)},
+		{float64(corners[1].X), float64(corners[1].Y)},
+		{float64(corners[2].X), float64(corners[2].Y)},
+		{float64(corners[3].X), float64(corners[3].Y)},
+	}
+
+	// Destination corners (transformed image coordinates)
+	dstPts := []point{
+		{0, 0},
+		{float64(outputSize), 0},
+		{float64(outputSize), float64(outputSize)},
+		{0, float64(outputSize)},
+	}
+
+	// Compute perspective transform matrix (src -> dst)
+	matrix := computePerspectiveMatrix(srcPts, dstPts)
+
+	// Get intrinsic parameters
+	fx := props.IntrinsicParams.Fx
+	fy := props.IntrinsicParams.Fy
+	ppx := props.IntrinsicParams.Ppx
+	ppy := props.IntrinsicParams.Ppy
+
 	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
-		// Project the 3D point to 2D image coordinates
+		// Project 3D point to original 2D coordinates
 		imgX, imgY := props.IntrinsicParams.PointToPixel(p.X, p.Y, p.Z)
 
-		// Check if the projected point is inside the board quadrilateral
-		if pointInPolygon(imgX, imgY, polygon) {
-			// Add the point to the filtered pointcloud
-			if d != nil {
-				filtered.Set(p, d)
-			} else {
-				filtered.Set(p, nil)
-			}
+		// Check if inside board quadrilateral
+		if !pointInPolygon(imgX, imgY, polygon) {
+			return true
+		}
+
+		// Apply perspective transform to get new 2D coordinates
+		newImgX, newImgY := applyPerspective(matrix, imgX, imgY)
+
+		// Un-project to get new 3D coordinates that will project to (newImgX, newImgY)
+		// Using: imgX = fx * X/Z + ppx, imgY = fy * Y/Z + ppy
+		// So: X = (imgX - ppx) * Z / fx, Y = (imgY - ppy) * Z / fy
+		newX := (newImgX - ppx) * p.Z / fx
+		newY := (newImgY - ppy) * p.Z / fy
+
+		newPoint := r3.Vector{X: newX, Y: newY, Z: p.Z}
+		if d != nil {
+			filtered.Set(newPoint, d)
+		} else {
+			filtered.Set(newPoint, nil)
 		}
 		return true
 	})

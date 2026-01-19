@@ -124,6 +124,8 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
+			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
+
 			xStartOffset := int(('h' - file)) * squareSize
 			yStartOffset := (rank - 1) * squareSize
 
@@ -146,7 +148,9 @@ func BoardDebugImageHack(srcImg image.Image, pc pointcloud.PointCloud, props cam
 				return nil, nil, err
 			}
 
-			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
+			if subPc.Size() == 0 {
+				return nil, nil, fmt.Errorf("pc for %s is empty in BoardDebugImageHack", name)
+			}
 
 			pieceColor := estimatePieceColor(subPc)
 			colorNames := []string{"", "W", "B"}
@@ -309,7 +313,7 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		if pc == nil {
 			return ret, fmt.Errorf("why is pc nil")
 		}
-		
+
 		label := fmt.Sprintf("%s-%d", s.name, s.color)
 		o, err := viz.NewObjectWithLabel(pc, label, nil)
 		if err != nil {
