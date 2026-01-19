@@ -319,7 +319,7 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		if err != nil {
 			return ret, err
 		}
-		bc.logger.Infof("eliot: %v %#v", o, o)
+
 		if o.Geometry == nil {
 			return ret, fmt.Errorf("why is Geometry nil for square: %s %v", s.name, s)
 		}
