@@ -32,3 +32,4 @@ chesscli
 
 test*.jpg
 hack-test.jpg   
+data/*output.jpg
