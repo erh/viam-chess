@@ -31,6 +31,9 @@ func findBoard(img image.Image) ([]image.Point, error) {
 	// Step 5: Move corners inward to find the actual checkerboard start
 	corners = findCheckerboardStart(corners, img, gray, width, height)
 
+	// Step 6: Refine corners using line detection for precision
+	corners = refineCornersWithLines(gray, corners, width, height)
+
 	return corners, nil
 }
 
@@ -123,53 +126,82 @@ func findCheckerboardStart(corners []image.Point, img image.Image, gray [][]int,
 		startedOnWhiteBorder := false
 		isBottomRight := stepX < 0 && stepY < 0
 
-		if !isBottomRight {
-			// For this corner, determine the edge to scan
-			var edgeY int
-			if stepY > 0 {
-				// Top corner - scan near top edge
-				edgeY = 20
-			} else {
-				// Bottom corner - scan near bottom edge
-				edgeY = height - 20
-			}
-
-			// Scan from image edge toward center at this Y level
-			var scanStart, scanDir int
+		// Only use white border detection for top corners
+		isTopCorner := stepY > 0
+		if !isBottomRight && isTopCorner {
+			// For top corners, check if there's a white border extending to the top
+			var boardX int
+			centerY := height / 2
 			if stepX > 0 {
-				// Left corner - scan from left edge
-				scanStart = 0
-				scanDir = 1
+				// Left corner - scan from left to find board
+				for x := 0; x < width/2; x++ {
+					if gray[centerY][x] > 150 {
+						boardX = x + 20
+						break
+					}
+				}
 			} else {
-				// Right corner - scan from right edge
-				scanStart = width - 1
-				scanDir = -1
+				// Right corner - scan from right to find board
+				for x := width - 1; x > width/2; x-- {
+					if gray[centerY][x] > 150 {
+						boardX = x - 20
+						break
+					}
+				}
 			}
 
-			// Look for pattern: dark -> bright (white border) -> less bright (checkerboard)
-			foundDark := false
-			brightStreak := 0
-			for step := 0; step < width/2; step++ {
-				x := scanStart + scanDir*step
-				if x < 0 || x >= width {
-					break
+			var edgeY int
+			// Check if board has white border extending to top
+			if gray[3][boardX] > 150 {
+				// White border extends to top - use Y=3 for detection
+				edgeY = 3
+			} else {
+				// No white border at top - skip white border detection
+				edgeY = -1
+			}
+
+			// Skip white border detection if no white border at top
+			if edgeY < 0 {
+				// No white border - skip to non-white-border approach
+			} else {
+				// Scan from image edge toward center at this Y level
+				var scanStart, scanDir int
+				if stepX > 0 {
+					// Left corner - scan from left edge
+					scanStart = 0
+					scanDir = 1
+				} else {
+					// Right corner - scan from right edge
+					scanStart = width - 1
+					scanDir = -1
 				}
-				brightness := gray[edgeY][x]
-				if !foundDark && brightness < 80 {
-					foundDark = true
-				} else if foundDark && brightness > 170 {
-					brightStreak++
-					if brightStreak >= 15 {
-						startedOnWhiteBorder = true
+
+				// Look for pattern: dark -> bright (white border) -> less bright (checkerboard)
+				// Require a bright streak (>15 pixels) to distinguish white border from noise
+				foundDark := false
+				brightStreak := 0
+				for step := 0; step < width/2; step++ {
+					x := scanStart + scanDir*step
+					if x < 0 || x >= width {
 						break
 					}
-				} else if foundDark && brightStreak > 0 && brightness < 150 {
-					if brightStreak >= 15 {
-						startedOnWhiteBorder = true
-						break
+					brightness := gray[edgeY][x]
+					if !foundDark && brightness < 80 {
+						foundDark = true
+					} else if foundDark && brightness > 145 {
+						brightStreak++
+						if brightStreak >= 15 {
+							startedOnWhiteBorder = true
+							break
+						}
+					} else if foundDark && brightStreak > 0 && brightness < 130 {
+						if brightStreak >= 15 {
+							startedOnWhiteBorder = true
+							break
+						}
+						// Streak too short - likely noise
+						brightStreak = 0
 					}
-					// Streak too short - was likely coordinate labels
-					brightStreak = 0
 				}
 			}
 		}
@@ -252,46 +284,35 @@ func findCheckerboardStart(corners []image.Point, img image.Image, gray [][]int,
 	return refined
 }
 
-// findOuterBoardEdge scans OUTWARD from a position to find where the board meets dark background
-// Returns the X (if dx != 0) or Y (if dy != 0) coordinate at the board's outer edge
-// findWhiteBorderCornerFromEdge finds the inner edge of the white border
-// (where the checkerboard pattern starts) by:
-// 1. Scanning from image edge to find outer edge of white border
-// 2. Continuing to find where brightness drops (inner edge = checkerboard start)
+// findWhiteBorderCornerFromEdge finds the inner corner of the white border
+// (where the white border meets the checkerboard) by scanning from the edges
 func findWhiteBorderCornerFromEdge(gray [][]int, dirX, dirY, width, height int) image.Point {
-	// Determine scan directions and edge positions
-	var scanDirX, scanDirY int
-	var startX, startY int
+	// Determine scan starting positions and directions
+	var startX int
+	var scanDirX int
 
 	if dirX < 0 {
-		startX = 0          // start at left edge
-		scanDirX = 1        // scan toward right (into board)
+		startX = 0
+		scanDirX = 1
 	} else {
-		startX = width - 1  // start at right edge
-		scanDirX = -1       // scan toward left (into board)
-	}
-	if dirY < 0 {
-		startY = 0          // start at top edge
-		scanDirY = 1        // scan toward bottom (into board)
-	} else {
-		startY = height - 1 // start at bottom edge
-		scanDirY = -1       // scan toward top (into board)
+		startX = width - 1
+		scanDirX = -1
 	}
 
-	// Find X position of inner edge (white border -> checkerboard transition)
-	// For top corners, scan at Y close to top edge (Y=8)
-	// For bottom corners, scan further inside where checkerboard is visible
+	// Find a good Y level for the X scan - needs to be where we can see
+	// the transition from white border to coordinate labels/checkerboard
 	var searchY int
 	if dirY < 0 {
-		// Top corner - use Y very close to top edge
-		searchY = 8
+		// Top corner - use Y level where coordinate label text is visible
+		// The coordinate labels (like "8") are typically around Y=8-12
+		searchY = 10
 	} else {
-		// Bottom corner - scan at a Y level where we can see the checkerboard
-		// The inner edge of white border is ~20-30 pixels from the image edge
-		// So scan at Y = height - 40 to be inside the checkerboard area
-		searchY = height - 40
+		// Bottom corner - use position near bottom where white border is visible
+		searchY = height - 10
 	}
 
+	// Find X position: scan from edge, find white border, then find where it ends
+	// (transition from white to checkerboard)
 	finalX := startX
 	foundWhite := false
 
@@ -302,47 +323,56 @@ func findWhiteBorderCornerFromEdge(gray [][]int, dirX, dirY, width, height int) 
 		}
 		brightness := gray[searchY][nx]
 
-		if !foundWhite && brightness > 170 {
-			// Found the white border (threshold lowered for bottom edge)
+		if !foundWhite && brightness > 150 {
+			// Found the white border
 			foundWhite = true
-		} else if foundWhite && brightness < 120 {
-			// Found transition to checkerboard
-			// The inner edge is at the last white position
+		} else if foundWhite && brightness < 130 {
+			// Found transition from white border to checkerboard
+			// Back up to the last white position
 			finalX = nx - scanDirX
 			break
 		}
 	}
 
-	// Find Y position of the board edge
-	// For the Y scan, use the found X. finalX is at the inner edge of the white
-	// border, so we scan at that position or slightly into the checkerboard area
-	// to ensure we find the vertical transition.
-	searchX := finalX + scanDirX*3 // Move 3 pixels into the checkerboard area
+	// Find Y position: scan from edge at a position inside the white border
+	// Move AWAY from the inner edge to be inside the white border
+	searchX := finalX - scanDirX*15 // Move toward the center of the white border
 	if searchX < 0 {
 		searchX = 0
 	} else if searchX >= width {
 		searchX = width - 1
 	}
 
-	finalY := startY
-	foundWhiteBorder := false
-
-	for step := 0; step < height; step++ {
-		ny := startY + scanDirY*step
-		if ny < 0 || ny >= height {
-			break
+	// Find Y position
+	var finalY int
+	if dirY < 0 {
+		// Top corner - find where the white border starts from the top
+		// Use a position inside the white border (not at the inner edge)
+		searchXForY := finalX - scanDirX*30 // Move toward center of white border
+		if searchXForY < 0 {
+			searchXForY = 0
+		} else if searchXForY >= width {
+			searchXForY = width - 1
 		}
-		brightness := gray[ny][searchX]
-
-		// Looking for: [dark background?] → white border → checkerboard
-		// The inner edge is where white border (>180) transitions to checkerboard (<140)
-		if brightness > 180 {
-			foundWhiteBorder = true
-		} else if foundWhiteBorder && brightness < 140 {
-			// Found the inner edge (white border → checkerboard transition)
-			// Back up one step to be on the last white border pixel
-			finalY = ny - scanDirY
-			break
+		finalY = 0 // default
+		for y := 0; y < height/4; y++ {
+			if gray[y][searchXForY] > 150 {
+				finalY = y
+				break
+			}
+		}
+	} else {
+		// Bottom corner - find where the white border ends at the bottom
+		foundWhiteBorder := false
+		finalY = height - 1 // default to bottom
+		for y := height - 1; y > height*3/4; y-- {
+			brightness := gray[y][searchX]
+			if brightness > 150 {
+				foundWhiteBorder = true
+			} else if foundWhiteBorder && brightness < 130 {
+				finalY = y + 1
+				break
+			}
 		}
 	}
 
@@ -677,4 +707,383 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// Line represents a line in the form: rho = x*cos(theta) + y*sin(theta)
+type Line struct {
+	rho   float64
+	theta float64
+	votes int
+}
+
+// sobelEdgeDetection computes edge magnitude using Sobel operator
+func sobelEdgeDetection(gray [][]int, width, height int) [][]int {
+	edges := make([][]int, height)
+	for y := range height {
+		edges[y] = make([]int, width)
+	}
+
+	for y := 1; y < height-1; y++ {
+		for x := 1; x < width-1; x++ {
+			// Sobel X kernel
+			gx := -gray[y-1][x-1] + gray[y-1][x+1] +
+				-2*gray[y][x-1] + 2*gray[y][x+1] +
+				-gray[y+1][x-1] + gray[y+1][x+1]
+
+			// Sobel Y kernel
+			gy := -gray[y-1][x-1] - 2*gray[y-1][x] - gray[y-1][x+1] +
+				gray[y+1][x-1] + 2*gray[y+1][x] + gray[y+1][x+1]
+
+			mag := int(math.Sqrt(float64(gx*gx + gy*gy)))
+			if mag > 255 {
+				mag = 255
+			}
+			edges[y][x] = mag
+		}
+	}
+
+	return edges
+}
+
+// houghLineDetection detects lines using Hough transform
+func houghLineDetection(edges [][]int, width, height int, edgeThreshold int) []Line {
+	// Hough space parameters
+	maxRho := int(math.Sqrt(float64(width*width + height*height)))
+	numThetas := 180
+
+	// Accumulator: rho ranges from -maxRho to +maxRho
+	accumulator := make([][]int, 2*maxRho+1)
+	for i := range accumulator {
+		accumulator[i] = make([]int, numThetas)
+	}
+
+	// Pre-compute sin/cos values
+	cosTheta := make([]float64, numThetas)
+	sinTheta := make([]float64, numThetas)
+	for t := 0; t < numThetas; t++ {
+		theta := float64(t) * math.Pi / float64(numThetas)
+		cosTheta[t] = math.Cos(theta)
+		sinTheta[t] = math.Sin(theta)
+	}
+
+	// Vote for each edge pixel
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			if edges[y][x] < edgeThreshold {
+				continue
+			}
+
+			for t := 0; t < numThetas; t++ {
+				rho := float64(x)*cosTheta[t] + float64(y)*sinTheta[t]
+				rhoIdx := int(rho) + maxRho
+				if rhoIdx >= 0 && rhoIdx < 2*maxRho+1 {
+					accumulator[rhoIdx][t]++
+				}
+			}
+		}
+	}
+
+	// Find peaks in accumulator (lines with many votes)
+	var lines []Line
+	voteThreshold := 100 // Minimum votes to consider a line
+
+	for rhoIdx := 0; rhoIdx < 2*maxRho+1; rhoIdx++ {
+		for t := 0; t < numThetas; t++ {
+			if accumulator[rhoIdx][t] < voteThreshold {
+				continue
+			}
+
+			// Local maximum check (simple 5x5 neighborhood)
+			isMax := true
+			for dr := -2; dr <= 2 && isMax; dr++ {
+				for dt := -2; dt <= 2 && isMax; dt++ {
+					if dr == 0 && dt == 0 {
+						continue
+					}
+					nRho := rhoIdx + dr
+					nT := (t + dt + numThetas) % numThetas
+					if nRho >= 0 && nRho < 2*maxRho+1 {
+						if accumulator[nRho][nT] > accumulator[rhoIdx][t] {
+							isMax = false
+						}
+					}
+				}
+			}
+
+			if isMax {
+				rho := float64(rhoIdx - maxRho)
+				theta := float64(t) * math.Pi / float64(numThetas)
+				lines = append(lines, Line{rho: rho, theta: theta, votes: accumulator[rhoIdx][t]})
+			}
+		}
+	}
+
+	// Sort by votes (descending)
+	sort.Slice(lines, func(i, j int) bool {
+		return lines[i].votes > lines[j].votes
+	})
+
+	return lines
+}
+
+// lineIntersection finds the intersection point of two lines
+func lineIntersection(l1, l2 Line) (image.Point, bool) {
+	// Line 1: x*cos(t1) + y*sin(t1) = r1
+	// Line 2: x*cos(t2) + y*sin(t2) = r2
+
+	c1, s1 := math.Cos(l1.theta), math.Sin(l1.theta)
+	c2, s2 := math.Cos(l2.theta), math.Sin(l2.theta)
+
+	det := c1*s2 - c2*s1
+	if math.Abs(det) < 1e-10 {
+		return image.Point{}, false // Parallel lines
+	}
+
+	x := (s2*l1.rho - s1*l2.rho) / det
+	y := (c1*l2.rho - c2*l1.rho) / det
+
+	return image.Point{X: int(math.Round(x)), Y: int(math.Round(y))}, true
+}
+
+// findBoardLines finds the 4 lines forming the board border
+func findBoardLines(lines []Line, corners []image.Point, width, height int) (topLine, bottomLine, leftLine, rightLine Line, found bool) {
+	if len(lines) < 4 || len(corners) < 4 {
+		return Line{}, Line{}, Line{}, Line{}, false
+	}
+
+	// Separate lines into horizontal (theta near 90 deg) and vertical (theta near 0 or 180 deg)
+	var horizontalLines, verticalLines []Line
+	for _, l := range lines {
+		// theta is in radians, 0-pi
+		// horizontal: theta near pi/2 (90 deg) - lines where y is mostly constant
+		// vertical: theta near 0 or pi (0 or 180 deg) - lines where x is mostly constant
+		if l.theta > math.Pi/4 && l.theta < 3*math.Pi/4 {
+			horizontalLines = append(horizontalLines, l)
+		} else {
+			verticalLines = append(verticalLines, l)
+		}
+	}
+
+	if len(horizontalLines) < 2 || len(verticalLines) < 2 {
+		return Line{}, Line{}, Line{}, Line{}, false
+	}
+
+	// For horizontal lines: find the line that passes closest to the top corners
+	// and the line that passes closest to the bottom corners
+	topLine = findLineNearCorners(horizontalLines, []image.Point{corners[0], corners[1]})
+	bottomLine = findLineNearCorners(horizontalLines, []image.Point{corners[2], corners[3]})
+
+	// For vertical lines: find the line that passes closest to the left corners
+	// and the line that passes closest to the right corners
+	leftLine = findLineNearCorners(verticalLines, []image.Point{corners[0], corners[3]})
+	rightLine = findLineNearCorners(verticalLines, []image.Point{corners[1], corners[2]})
+
+	return topLine, bottomLine, leftLine, rightLine, true
+}
+
+// findLineNearCorners finds the line that passes closest to the given corners
+// It prefers lines that are further from the center (outer border lines)
+func findLineNearCorners(lines []Line, corners []image.Point) Line {
+	best := lines[0]
+	bestScore := math.MaxFloat64
+
+	// Compute center of corners to determine which direction is "outer"
+	centerX, centerY := 0.0, 0.0
+	for _, c := range corners {
+		centerX += float64(c.X)
+		centerY += float64(c.Y)
+	}
+	centerX /= float64(len(corners))
+	centerY /= float64(len(corners))
+
+	for _, l := range lines {
+		// Score = sum of distances from each corner to the line
+		score := 0.0
+		for _, c := range corners {
+			dist := distanceToLine(l, c)
+			score += dist
+		}
+
+		// Penalize lines that don't pass through the corner positions
+		// But also prefer lines that are further from the board center
+		avgCornerDist := score / float64(len(corners))
+
+		// If the line passes reasonably close to corners (within 15 pixels average),
+		// prefer the one furthest from center
+		if avgCornerDist < 15 {
+			// Compute line's distance from corner centroid
+			// For outer lines, this should be larger
+			lineDistFromCenter := math.Abs(centerX*math.Cos(l.theta) + centerY*math.Sin(l.theta) - l.rho)
+
+			// Score: lower is better
+			// Prefer lines close to corners but far from center
+			adjustedScore := avgCornerDist - lineDistFromCenter/50.0
+			if adjustedScore < bestScore {
+				bestScore = adjustedScore
+				best = l
+			}
+		} else {
+			// Line is too far from corners, use basic scoring
+			adjustedScore := avgCornerDist - float64(l.votes)/100.0
+			if adjustedScore < bestScore {
+				bestScore = adjustedScore
+				best = l
+			}
+		}
+	}
+
+	return best
+}
+
+// distanceToLine computes perpendicular distance from point to line
+func distanceToLine(l Line, pt image.Point) float64 {
+	// Line: x*cos(theta) + y*sin(theta) = rho
+	// Distance = |x*cos(theta) + y*sin(theta) - rho|
+	return math.Abs(float64(pt.X)*math.Cos(l.theta) + float64(pt.Y)*math.Sin(l.theta) - l.rho)
+}
+
+// refineCornersWithLines refines corners using detected lines
+func refineCornersWithLines(gray [][]int, corners []image.Point, width, height int) []image.Point {
+	// Compute edges
+	edges := sobelEdgeDetection(gray, width, height)
+
+	// Detect lines
+	lines := houghLineDetection(edges, width, height, 50)
+
+	if len(lines) < 4 {
+		return corners
+	}
+
+	// Find the 4 board border lines
+	topLine, bottomLine, leftLine, rightLine, found := findBoardLines(lines, corners, width, height)
+	if !found {
+		return corners
+	}
+
+	// Compute intersections
+	refined := make([]image.Point, 4)
+
+	// Top-left: intersection of top and left lines
+	if pt, ok := lineIntersection(topLine, leftLine); ok && isValidCorner(pt, width, height) {
+		refined[0] = pt
+	} else {
+		refined[0] = corners[0]
+	}
+
+	// Top-right: intersection of top and right lines
+	if pt, ok := lineIntersection(topLine, rightLine); ok && isValidCorner(pt, width, height) {
+		refined[1] = pt
+	} else {
+		refined[1] = corners[1]
+	}
+
+	// Bottom-right: intersection of bottom and right lines
+	if pt, ok := lineIntersection(bottomLine, rightLine); ok && isValidCorner(pt, width, height) {
+		refined[2] = pt
+	} else {
+		refined[2] = corners[2]
+	}
+
+	// Bottom-left: intersection of bottom and left lines
+	if pt, ok := lineIntersection(bottomLine, leftLine); ok && isValidCorner(pt, width, height) {
+		refined[3] = pt
+	} else {
+		refined[3] = corners[3]
+	}
+
+	// For boards with white border, refine bottom corners by finding the actual border edge
+	refined = refineWhiteBorderCorners(gray, refined, width, height)
+
+	return refined
+}
+
+// refineWhiteBorderCorners adjusts corners for boards with white border frames
+func refineWhiteBorderCorners(gray [][]int, corners []image.Point, width, height int) []image.Point {
+	// Check if this is a white-bordered board by looking for white border that extends to the image edge
+	// For white-bordered boards, the white border should be visible from the corner all the way to the top of the image
+	leftX := corners[0].X
+	topY := corners[0].Y
+
+	// For a white-bordered board (like board3/4), the top corners should have topY close to 0
+	// and there should be bright white from topY to Y=0
+	// For regular boards (like board1/2), topY is typically 50+ pixels from the top
+
+	isWhiteBordered := false
+
+	// White-bordered boards have their top edge very close to Y=0 (within 10 pixels)
+	// and bright white along the left edge at the very top of the image
+	if topY < 15 {
+		// Check if there's a bright white strip at the very top of the image
+		// Sample at a position inside the left edge of the detected board
+		sampleX := leftX + 10
+		if sampleX < width {
+			// Check if the first few rows (Y=0 to Y=5) are bright - this indicates
+			// a white border that extends to the top of the image
+			brightCount := 0
+			for y := 0; y < 6 && y < height; y++ {
+				if gray[y][sampleX] > 150 {
+					brightCount++
+				}
+			}
+			// If most of the top rows are bright, it's a white-bordered board
+			if brightCount >= 4 {
+				isWhiteBordered = true
+			}
+		}
+	}
+
+	if !isWhiteBordered {
+		return corners // Not a white-bordered board
+	}
+
+	// For bottom corners, find where the white border actually ends
+	// Sample at multiple X positions and use the maximum Y found
+	// This accounts for perspective distortion where the board edge isn't horizontal
+	bottomLeftX := corners[3].X
+	bottomRightX := corners[2].X
+
+	maxBottomY := 0
+	// Sample at several positions across the board
+	for i := 0; i < 5; i++ {
+		sampleX := bottomLeftX + 20 + i*(bottomRightX-bottomLeftX-40)/4
+		if sampleX >= 0 && sampleX < width {
+			y := findWhiteBorderEdgeFromBottom(gray, sampleX, height)
+			if y > maxBottomY {
+				maxBottomY = y
+			}
+		}
+	}
+
+	// Update both bottom corners to use the maximum Y value found
+	if maxBottomY > corners[2].Y && maxBottomY < height-5 {
+		corners[2] = image.Point{corners[2].X, maxBottomY}
+	}
+	if maxBottomY > corners[3].Y && maxBottomY < height-5 {
+		corners[3] = image.Point{corners[3].X, maxBottomY}
+	}
+
+	return corners
+}
+
+// findWhiteBorderEdgeFromBottom scans from the bottom of the image upward
+// to find where the white border transitions to dark (the inner edge of the border)
+func findWhiteBorderEdgeFromBottom(gray [][]int, x, height int) int {
+	// Start from bottom, look for bright -> dark transition
+	foundBright := false
+	for y := height - 1; y > height/2; y-- {
+		brightness := gray[y][x]
+		if brightness > 150 {
+			foundBright = true
+		} else if foundBright && brightness < 100 {
+			// Found the inner edge of the white border
+			return y
+		}
+	}
+	return height - 1
+}
+
+func isValidCorner(pt image.Point, width, height int) bool {
+	margin := 50
+	return pt.X >= -margin && pt.X < width+margin &&
+		pt.Y >= -margin && pt.Y < height+margin
 }
