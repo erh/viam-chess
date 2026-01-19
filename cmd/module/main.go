@@ -1,6 +1,7 @@
 package main
 
 import (
+	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/module"
 	"go.viam.com/rdk/resource"
 	generic "go.viam.com/rdk/services/generic"
@@ -10,7 +11,8 @@ import (
 
 func main() {
 	module.ModularMain(
-		resource.APIModel{vision.API, viamchess.PieceFinderModel},
-		resource.APIModel{generic.API, viamchess.ChessModel},
+		resource.APIModel{API: camera.API, Model: viamchess.BoardFinderCamModel},
+		resource.APIModel{API: vision.API, Model: viamchess.PieceFinderModel},
+		resource.APIModel{API: generic.API, Model: viamchess.ChessModel},
 	)
 }

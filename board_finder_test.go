@@ -88,24 +88,67 @@ func drawCross(img *image.RGBA, cx, cy, size int, c color.Color) {
 	}
 }
 
-func TestFindBoardCorners2(t *testing.T) {
-	input, err := rimage.ReadImageFromFile("data/board2.jpg")
+func TestFindBoardCorners3(t *testing.T) {
+	input, err := rimage.ReadImageFromFile("data/board3.jpg")
 	test.That(t, err, test.ShouldBeNil)
-
-	// Debug: check initial boundary corners
-	bounds := input.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	boardMask := createBoardMaskColor(input, width, height)
-	boundaryPoints := findBoundary(boardMask)
-	hull := convexHull(boundaryPoints)
-	initialCorners := findExtremePointsSimple(hull)
-	t.Logf("Initial boundary corners: %v", initialCorners)
 
 	corners, err := findBoard(input)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(corners), test.ShouldEqual, 4)
 
-	t.Logf("Refined corners: %v", corners)
+	t.Logf("Found corners: %v", corners)
+
+	// Draw corners on output image
+	output := image.NewRGBA(input.Bounds())
+	draw.Draw(output, input.Bounds(), input, image.Point{}, draw.Src)
+
+	// Mark each corner with a red circle
+	red := color.RGBA{255, 0, 0, 255}
+	for _, corner := range corners {
+		drawCircle(output, corner.X, corner.Y, 10, red)
+		drawCross(output, corner.X, corner.Y, 15, red)
+	}
+
+	// Save output image
+	err = rimage.WriteImageToFile("data/board3_output.jpg", output)
+	test.That(t, err, test.ShouldBeNil)
+	t.Log("Saved output image to data/board3_output.jpg")
+
+	// Check all 4 expected corners
+	expectedCorners := []image.Point{
+		{277, 8},    // top-left
+		{955, 5},    // top-right
+		{971, 683},  // bottom-right
+		{272, 698},  // bottom-left
+	}
+
+	tolerance := 8.0
+	for _, expected := range expectedCorners {
+		minDist := math.MaxFloat64
+		var closestCorner image.Point
+		for _, corner := range corners {
+			dx := float64(corner.X - expected.X)
+			dy := float64(corner.Y - expected.Y)
+			dist := math.Sqrt(dx*dx + dy*dy)
+			if dist < minDist {
+				minDist = dist
+				closestCorner = corner
+			}
+		}
+		t.Logf("Expected %v, closest found: %v, distance: %.1f pixels", expected, closestCorner, minDist)
+		test.That(t, minDist, test.ShouldBeLessThan, tolerance)
+	}
+}
+
+func TestFindBoardCorners2(t *testing.T) {
+	input, err := rimage.ReadImageFromFile("data/board2.jpg")
+	test.That(t, err, test.ShouldBeNil)
+
+	corners, err := findBoard(input)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(corners), test.ShouldEqual, 4)
+
+	t.Logf("Found corners: %v", corners)
 
 	// Draw corners on output image
 	output := image.NewRGBA(input.Bounds())

@@ -29,7 +29,7 @@ func findBoard(img image.Image) ([]image.Point, error) {
 	corners := findExtremeCorners(boundaryPoints)
 
 	// Step 5: Move corners inward to find the actual checkerboard start
-	corners = findCheckerboardStart(corners, gray, width, height)
+	corners = findCheckerboardStart(corners, img, gray, width, height)
 
 	return corners, nil
 }
@@ -83,7 +83,7 @@ func createBoardMaskColor(img image.Image, width, height int) [][]bool {
 }
 
 // findCheckerboardStart moves corners inward until we find the checkerboard pattern
-func findCheckerboardStart(corners []image.Point, gray [][]int, width, height int) []image.Point {
+func findCheckerboardStart(corners []image.Point, img image.Image, gray [][]int, width, height int) []image.Point {
 	if len(corners) != 4 {
 		return corners
 	}
@@ -117,6 +117,101 @@ func findCheckerboardStart(corners []image.Point, gray [][]int, width, height in
 			stepY = -1
 		}
 
+		// Check if this board has a white border by scanning along the board edge
+		// Skip white border detection for bottom-right corner (i=2, stepX<0 && stepY<0)
+		// because the Y scan doesn't work well there due to the narrow white border
+		startedOnWhiteBorder := false
+		isBottomRight := stepX < 0 && stepY < 0
+
+		if !isBottomRight {
+			// For this corner, determine the edge to scan
+			var edgeY int
+			if stepY > 0 {
+				// Top corner - scan near top edge
+				edgeY = 20
+			} else {
+				// Bottom corner - scan near bottom edge
+				edgeY = height - 20
+			}
+
+			// Scan from image edge toward center at this Y level
+			var scanStart, scanDir int
+			if stepX > 0 {
+				// Left corner - scan from left edge
+				scanStart = 0
+				scanDir = 1
+			} else {
+				// Right corner - scan from right edge
+				scanStart = width - 1
+				scanDir = -1
+			}
+
+			// Look for pattern: dark -> bright (white border) -> less bright (checkerboard)
+			foundDark := false
+			brightStreak := 0
+			for step := 0; step < width/2; step++ {
+				x := scanStart + scanDir*step
+				if x < 0 || x >= width {
+					break
+				}
+				brightness := gray[edgeY][x]
+				if !foundDark && brightness < 80 {
+					foundDark = true
+				} else if foundDark && brightness > 170 {
+					brightStreak++
+					if brightStreak >= 15 {
+						startedOnWhiteBorder = true
+						break
+					}
+				} else if foundDark && brightStreak > 0 && brightness < 150 {
+					if brightStreak >= 15 {
+						startedOnWhiteBorder = true
+						break
+					}
+					// Streak too short - was likely coordinate labels
+					brightStreak = 0
+				}
+			}
+		}
+
+		if startedOnWhiteBorder {
+			// For white-bordered boards, scan from image edges to find actual board boundaries
+			// Note: -stepX, -stepY indicate the corner direction
+			candidate := findWhiteBorderCornerFromEdge(gray, -stepX, -stepY, width, height)
+
+			// Validate: the candidate should not be at the WRONG edge.
+			// For top-left corner (stepX>0, stepY>0): X can be near left edge, Y can be near top edge
+			// But X should not be near right edge, Y should not be near bottom edge.
+			edgeMargin := 20
+			validCandidate := true
+
+			// Check X is not at the wrong edge
+			if stepX > 0 && candidate.X > width-edgeMargin {
+				validCandidate = false // Left corner at right edge
+			}
+			if stepX < 0 && candidate.X < edgeMargin {
+				validCandidate = false // Right corner at left edge
+			}
+
+			// Check Y is not at the wrong edge
+			if stepY > 0 && candidate.Y > height-edgeMargin {
+				validCandidate = false // Top corner at bottom edge
+			}
+			if stepY < 0 && candidate.Y < edgeMargin {
+				validCandidate = false // Bottom corner at top edge
+			}
+
+			// Also validate: the candidate should be reasonably close to the initial corner
+			// (within ~200 pixels in each dimension)
+			dx := abs(candidate.X - corner.X)
+			dy := abs(candidate.Y - corner.Y)
+			if validCandidate && dx < 200 && dy < 200 {
+				refined[i] = candidate
+				continue
+			}
+			// Fall through to non-white-border approach
+		}
+
 		// Move inward until we detect a brightness transition (checkerboard edge)
 		x, y := corner.X, corner.Y
 		foundEdge := false
@@ -139,7 +234,7 @@ func findCheckerboardStart(corners []image.Point, gray [][]int, width, height in
 				grad = abs(gray[ny+1][nx]-gray[ny-1][nx]) + abs(gray[ny][nx+1]-gray[ny][nx-1])
 			}
 
-			// High gradient indicates edge of a square
+			// Standard behavior for boards without white border
 			if grad > 40 && step > 10 {
 				foundEdge = true
 			}
@@ -148,7 +243,6 @@ func findCheckerboardStart(corners []image.Point, gray [][]int, width, height in
 		}
 
 		// Fine-tune X and Y independently by scanning back toward boundary
-		// to find where the actual edge is
 		finalX := adjustCoordinate(gray, x, y, -stepX, 0, width, height, 20)
 		finalY := adjustCoordinate(gray, x, y, 0, -stepY, width, height, 20)
 
@@ -156,6 +250,103 @@ func findCheckerboardStart(corners []image.Point, gray [][]int, width, height in
 	}
 
 	return refined
+}
+
+// findOuterBoardEdge scans OUTWARD from a position to find where the board meets dark background
+// Returns the X (if dx != 0) or Y (if dy != 0) coordinate at the board's outer edge
+// findWhiteBorderCornerFromEdge finds the inner edge of the white border
+// (where the checkerboard pattern starts) by:
+// 1. Scanning from image edge to find outer edge of white border
+// 2. Continuing to find where brightness drops (inner edge = checkerboard start)
+func findWhiteBorderCornerFromEdge(gray [][]int, dirX, dirY, width, height int) image.Point {
+	// Determine scan directions and edge positions
+	var scanDirX, scanDirY int
+	var startX, startY int
+
+	if dirX < 0 {
+		startX = 0          // start at left edge
+		scanDirX = 1        // scan toward right (into board)
+	} else {
+		startX = width - 1  // start at right edge
+		scanDirX = -1       // scan toward left (into board)
+	}
+	if dirY < 0 {
+		startY = 0          // start at top edge
+		scanDirY = 1        // scan toward bottom (into board)
+	} else {
+		startY = height - 1 // start at bottom edge
+		scanDirY = -1       // scan toward top (into board)
+	}
+
+	// Find X position of inner edge (white border -> checkerboard transition)
+	// For top corners, scan at Y close to top edge (Y=8)
+	// For bottom corners, scan further inside where checkerboard is visible
+	var searchY int
+	if dirY < 0 {
+		// Top corner - use Y very close to top edge
+		searchY = 8
+	} else {
+		// Bottom corner - scan at a Y level where we can see the checkerboard
+		// The inner edge of white border is ~20-30 pixels from the image edge
+		// So scan at Y = height - 40 to be inside the checkerboard area
+		searchY = height - 40
+	}
+
+	finalX := startX
+	foundWhite := false
+
+	for step := 0; step < width; step++ {
+		nx := startX + scanDirX*step
+		if nx < 0 || nx >= width {
+			break
+		}
+		brightness := gray[searchY][nx]
+
+		if !foundWhite && brightness > 170 {
+			// Found the white border (threshold lowered for bottom edge)
+			foundWhite = true
+		} else if foundWhite && brightness < 120 {
+			// Found transition to checkerboard
+			// The inner edge is at the last white position
+			finalX = nx - scanDirX
+			break
+		}
+	}
+
+	// Find Y position of the board edge
+	// For the Y scan, use the found X. finalX is at the inner edge of the white
+	// border, so we scan at that position or slightly into the checkerboard area
+	// to ensure we find the vertical transition.
+	searchX := finalX + scanDirX*3 // Move 3 pixels into the checkerboard area
+	if searchX < 0 {
+		searchX = 0
+	} else if searchX >= width {
+		searchX = width - 1
+	}
+
+	finalY := startY
+	foundWhiteBorder := false
+
+	for step := 0; step < height; step++ {
+		ny := startY + scanDirY*step
+		if ny < 0 || ny >= height {
+			break
+		}
+		brightness := gray[ny][searchX]
+
+		// Looking for: [dark background?] → white border → checkerboard
+		// The inner edge is where white border (>180) transitions to checkerboard (<140)
+		if brightness > 180 {
+			foundWhiteBorder = true
+		} else if foundWhiteBorder && brightness < 140 {
+			// Found the inner edge (white border → checkerboard transition)
+			// Back up one step to be on the last white border pixel
+			finalY = ny - scanDirY
+			break
+		}
+	}
+
+	return image.Point{finalX, finalY}
 }
 
 // adjustCoordinate scans in one direction to find the strongest edge
