@@ -37,12 +37,12 @@ func TestFindBoardCorners(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	t.Log("Saved output image to data/board1_output.jpg")
 
-	// Check all 4 expected corners (from line intersection detection)
+	// Check all 4 expected corners (from edge-refined line intersection)
 	expectedCorners := []image.Point{
-		{388, 53},  // top-left
-		{966, 84},  // top-right
-		{935, 665}, // bottom-right
-		{348, 634}, // bottom-left
+		{388, 54},  // top-left
+		{965, 79},  // top-right
+		{938, 664}, // bottom-right
+		{359, 636}, // bottom-left
 	}
 
 	tolerance := 8.0
@@ -114,12 +114,12 @@ func TestFindBoardCorners3(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	t.Log("Saved output image to data/board3_output.jpg")
 
-	// Check all 4 expected corners (from line intersection detection)
+	// Check all 4 expected corners (from edge-refined line intersection)
 	expectedCorners := []image.Point{
-		{272, 5},   // top-left
-		{948, 5},   // top-right
-		{972, 697}, // bottom-right
-		{272, 697}, // bottom-left
+		{269, 7},   // top-left
+		{952, 5},   // top-right
+		{970, 697}, // bottom-right
+		{275, 697}, // bottom-left
 	}
 
 	tolerance := 8.0
@@ -170,8 +170,8 @@ func TestFindBoardCorners2(t *testing.T) {
 	expectedCorners := []image.Point{
 		{302, 76},  // top-left
 		{883, 56},  // top-right
-		{903, 639}, // bottom-right
-		{313, 659}, // bottom-left
+		{905, 638}, // bottom-right
+		{311, 654}, // bottom-left
 	}
 
 	tolerance := 8.0
@@ -219,12 +219,12 @@ func TestFindBoardCorners4(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	t.Log("Saved output image to data/board4_output.jpg")
 
-	// Check all 4 expected corners (from line intersection detection)
+	// Check all 4 expected corners (from edge-refined line intersection)
 	expectedCorners := []image.Point{
-		{272, 5},   // top-left
-		{947, 5},   // top-right
-		{971, 693}, // bottom-right
-		{272, 693}, // bottom-left
+		{269, 7},   // top-left
+		{953, 5},   // top-right
+		{968, 693}, // bottom-right
+		{271, 697}, // bottom-left
 	}
 
 	tolerance := 8.0

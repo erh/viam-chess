@@ -128,6 +128,11 @@ func (c *BoardFinderCam) Stream(ctx context.Context, errHandlers ...gostream.Err
 }
 
 func (c *BoardFinderCam) NextPointCloud(ctx context.Context, extra map[string]interface{}) (pointcloud.PointCloud, error) {
+	// todo
+	// get both the image and pointcloud
+	// find the corners
+	// project the corners onto the pointcloud
+	// crop the pointcloud to points that are within the square and directly above it.
 	return nil, fmt.Errorf("point cloud not supported")
 }
 

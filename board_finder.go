@@ -991,10 +991,117 @@ func refineCornersWithLines(gray [][]int, corners []image.Point, width, height i
 		refined[3] = corners[3]
 	}
 
+	// Refine each corner by finding the exact edge positions
+	refined = refineCornersByEdgeTracing(gray, refined, width, height)
+
 	// For boards with white border, refine bottom corners by finding the actual border edge
 	refined = refineWhiteBorderCorners(gray, refined, width, height)
 
 	return refined
+}
+
+// refineCornersByEdgeTracing finds exact corner positions by looking for edge transitions
+// very close to the already-detected corner positions
+func refineCornersByEdgeTracing(gray [][]int, corners []image.Point, width, height int) []image.Point {
+	refined := make([]image.Point, 4)
+	copy(refined, corners)
+
+	// For each corner, refine X and Y independently by finding the nearest strong edge
+	// Corner order: 0=top-left, 1=top-right, 2=bottom-right, 3=bottom-left
+	// Direction toward board center for each corner
+	cornerDirs := [][2]int{
+		{1, 1},   // top-left: board is to the right and down
+		{-1, 1},  // top-right: board is to the left and down
+		{-1, -1}, // bottom-right: board is to the left and up
+		{1, -1},  // bottom-left: board is to the right and up
+	}
+
+	for i, corner := range corners {
+		dirX, dirY := cornerDirs[i][0], cornerDirs[i][1]
+
+		// Refine X: scan a small window around corner.X at a Y position inside the board
+		// Look for the transition between board and non-board
+		sampleY := corner.Y + dirY*15 // Sample 15 pixels inside the board
+		if sampleY >= 2 && sampleY < height-2 {
+			refinedX := findNearestEdgeX(gray, corner.X, sampleY, -dirX, width, 15)
+			if refinedX >= 0 {
+				refined[i].X = refinedX
+			}
+		}
+
+		// Refine Y: scan a small window around corner.Y at an X position inside the board
+		sampleX := corner.X + dirX*15 // Sample 15 pixels inside the board
+		if sampleX >= 2 && sampleX < width-2 {
+			refinedY := findNearestEdgeY(gray, sampleX, corner.Y, -dirY, height, 15)
+			if refinedY >= 0 {
+				refined[i].Y = refinedY
+			}
+		}
+	}
+
+	return refined
+}
+
+// findNearestEdgeX finds the X position of the nearest strong vertical edge
+func findNearestEdgeX(gray [][]int, startX, y, searchDir, width, maxDist int) int {
+	if y < 2 || y >= len(gray)-2 {
+		return -1
+	}
+
+	bestX := startX
+	bestGrad := 0
+
+	for dx := -maxDist; dx <= maxDist; dx++ {
+		x := startX + dx
+		if x < 2 || x >= width-2 {
+			continue
+		}
+
+		// Gradient in X direction (detecting vertical edges)
+		grad := abs(gray[y][x+1] - gray[y][x-1])
+
+		if grad > bestGrad {
+			bestGrad = grad
+			bestX = x
+		}
+	}
+
+	// Only return if we found a significant edge
+	if bestGrad > 40 {
+		return bestX
+	}
+	return startX
+}
+
+// findNearestEdgeY finds the Y position of the nearest strong horizontal edge
+func findNearestEdgeY(gray [][]int, x, startY, searchDir, height, maxDist int) int {
+	if x < 2 || x >= len(gray[0])-2 {
+		return -1
+	}
+
+	bestY := startY
+	bestGrad := 0
+
+	for dy := -maxDist; dy <= maxDist; dy++ {
+		y := startY + dy
+		if y < 2 || y >= height-2 {
+			continue
+		}
+
+		// Gradient in Y direction (detecting horizontal edges)
+		grad := abs(gray[y+1][x] - gray[y-1][x])
+
+		if grad > bestGrad {
+			bestGrad = grad
+			bestY = y
+		}
+	}
+
+	// Only return if we found a significant edge
+	if bestGrad > 40 {
+		return bestY
+	}
+	return startY
 }
 
 // refineWhiteBorderCorners adjusts corners for boards with white border frames
