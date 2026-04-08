@@ -14,6 +14,7 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
+	"golang.org/x/sync/errgroup"
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
@@ -169,7 +170,7 @@ func computeSquareBounds(corners []image.Point, col, row int) image.Rectangle {
 	return bounds
 }
 
-func findBoardAndPieces(srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties, logger logging.Logger) ([]squareInfo, error) {
+func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties, logger logging.Logger) ([]squareInfo, error) {
 
 	corners, err := findBoard(srcImg)
 	if err != nil {
@@ -183,35 +184,61 @@ func findBoardAndPieces(srcImg image.Image, pc pointcloud.PointCloud, props came
 		logger.Debugf("camera extrinsics: %v %v", props.ExtrinsicParams.Translation, props.ExtrinsicParams.Orientation)
 	}
 
-	squares := []squareInfo{}
-
+	// Phase 1: pre-compute all 64 square bounds and allocate sub-clouds
+	_, span := trace.StartSpan(ctx, "PieceFinder::findBoardAndPieces::ComputeSquareBounds")
+	squares := make([]squareInfo, 0, 64)
+	subPcs := make([]pointcloud.PointCloud, 0, 64)
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
 			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
-
 			srcRect := computeSquareBounds(corners, int('h'-file), rank-1)
-
-			subPc, err := touch.PCLimitToImageBoxes(pc, []*image.Rectangle{&srcRect}, nil, props)
-			if err != nil {
-				return nil, err
-			}
-
-			if subPc.Size() == 0 {
-				return nil, fmt.Errorf("pc for %s is empty in findBoardAndPieces srcRect: %v", name, srcRect)
-			}
-
-			pieceColor := estimatePieceColor(subPc)
-
 			squares = append(squares, squareInfo{
-				rank,
-				file,
-				name,
-				srcRect,
-				pieceColor,
-				subPc,
+				rank:           rank,
+				file:           file,
+				name:           name,
+				originalBounds: srcRect,
 			})
+			subPcs = append(subPcs, pointcloud.NewBasicEmpty())
 		}
 	}
+	span.End()
+
+	// Phase 2: single pass through point cloud — call PointToPixel once per point
+	// instead of 64 times (once per square), reducing from O(64N) to O(N)
+	_, span = trace.StartSpan(ctx, "PieceFinder::findBoardAndPieces::SinglePassPartition")
+	var outerErr error
+	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		x, y, err := props.PointToPixel(p)
+		if err != nil {
+			outerErr = err
+			return false
+		}
+		ix, iy := int(x), int(y)
+		for i, s := range squares {
+			b := s.originalBounds
+			if ix >= b.Min.X && ix <= b.Max.X && iy >= b.Min.Y && iy <= b.Max.Y {
+				subPcs[i].Set(p, d)
+				break
+			}
+		}
+		return true
+	})
+	span.End()
+	if outerErr != nil {
+		return nil, outerErr
+	}
+
+	// Phase 3: estimate piece color for each square
+	_, span = trace.StartSpan(ctx, "PieceFinder::findBoardAndPieces::EstimateColors")
+	for i := range squares {
+		if subPcs[i].Size() == 0 {
+			span.End()
+			return nil, fmt.Errorf("pc for %s is empty in findBoardAndPieces srcRect: %v", squares[i].name, squares[i].originalBounds)
+		}
+		squares[i].color = estimatePieceColor(subPcs[i])
+		squares[i].pc = subPcs[i]
+	}
+	span.End()
 
 	return squares, nil
 }
@@ -298,17 +325,25 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 
 	ret := viscapture.VisCapture{}
 
-	_, span2 := trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::Images")
-	ni, _, err := bc.input.Images(ctx, nil, extra)
-	span2.End()
-	if err != nil {
-		return ret, err
-	}
-
-	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::NextPointCloud")
-	pc, err := bc.input.NextPointCloud(ctx, extra)
-	span2.End()
-	if err != nil {
+	// Fetch image and point cloud in parallel — they are independent camera reads
+	var ni []camera.NamedImage
+	var pc pointcloud.PointCloud
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.Go(func() error {
+		_, span2 := trace.StartSpan(egCtx, "PieceFinder::CaptureAllFromCamera::Images")
+		var err error
+		ni, _, err = bc.input.Images(egCtx, nil, extra)
+		span2.End()
+		return err
+	})
+	eg.Go(func() error {
+		_, span2 := trace.StartSpan(egCtx, "PieceFinder::CaptureAllFromCamera::NextPointCloud")
+		var err error
+		pc, err = bc.input.NextPointCloud(egCtx, extra)
+		span2.End()
+		return err
+	})
+	if err := eg.Wait(); err != nil {
 		return ret, err
 	}
 
@@ -316,7 +351,8 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		return ret, fmt.Errorf("no images returned from input camera")
 	}
 
-	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::Image")
+	_, span2 := trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::Image")
+	var err error
 	ret.Image, err = ni[0].Image(ctx)
 	span2.End()
 	if err != nil {
@@ -324,7 +360,7 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 	}
 
 	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::findBoardAndPieces")
-	squares, err := findBoardAndPieces(ret.Image, pc, bc.props, bc.logger)
+	squares, err := findBoardAndPieces(ctx, ret.Image, pc, bc.props, bc.logger)
 	span2.End()
 	if err != nil {
 		if extra != nil && extra["debug"] == true {
@@ -359,61 +395,60 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		return ret, err
 	}
 
-	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::Finish")
-	defer span2.End()
+	// Process all 64 squares in parallel — transforms and pickup center calculations are independent
+	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::ParallelSquareTransforms")
+	ret.Objects = make([]*viz.Object, len(squares))
+	ret.Detections = make([]objectdetection.Detection, len(squares)*2)
 
-	ret.Objects = []*viz.Object{}
-	ret.Detections = []objectdetection.Detection{}
+	eg2, egCtx2 := errgroup.WithContext(ctx)
+	for i, s := range squares {
+		i, s := i, s
+		eg2.Go(func() error {
+			worldPc, err := bc.rfs.TransformPointCloud(egCtx2, s.pc, bc.conf.Input, "world")
+			if err != nil {
+				return err
+			}
+			if worldPc == nil {
+				return fmt.Errorf("why is pc nil")
+			}
 
-	for _, s := range squares {
-		pc, err := bc.rfs.TransformPointCloud(ctx, s.pc, bc.conf.Input, "world")
-		if err != nil {
-			return ret, err
-		}
+			label := fmt.Sprintf("%s-%d", s.name, s.color)
+			o, err := viz.NewObjectWithLabel(worldPc, label, nil)
+			if err != nil {
+				return err
+			}
+			if o.Geometry == nil {
+				return fmt.Errorf("why is Geometry nil for square: %s %v", s.name, s)
+			}
+			ret.Objects[i] = o
+			ret.Detections[i*2] = objectdetection.NewDetectionWithoutImgBounds(s.originalBounds, 1, label)
 
-		if pc == nil {
-			return ret, fmt.Errorf("why is pc nil")
-		}
+			highPointInWorld := GetPickupCenter(o)
+			highPointInCam, err := bc.rfs.TransformPose(egCtx2,
+				referenceframe.NewPoseInFrame("world", spatialmath.NewPoseFromPoint(highPointInWorld)),
+				bc.conf.Input,
+				nil)
+			if err != nil {
+				return err
+			}
+			highPoint := highPointInCam.Pose().Point()
 
-		label := fmt.Sprintf("%s-%d", s.name, s.color)
-		o, err := viz.NewObjectWithLabel(pc, label, nil)
-		if err != nil {
-			return ret, err
-		}
+			highX, highY, err := bc.props.PointToPixel(r3.Vector{X: highPoint.X, Y: highPoint.Y, Z: highPoint.Z})
+			if err != nil {
+				return fmt.Errorf("PointToPixel failed: %w", err)
+			}
 
-		if o.Geometry == nil {
-			return ret, fmt.Errorf("why is Geometry nil for square: %s %v", s.name, s)
-		}
-		ret.Objects = append(ret.Objects, o)
-
-		ret.Detections = append(ret.Detections, objectdetection.NewDetectionWithoutImgBounds(s.originalBounds, 1, label))
-
-		highPointInWorld := GetPickupCenter(o)
-
-		highPointInCam, err := bc.rfs.TransformPose(ctx,
-			referenceframe.NewPoseInFrame("world", spatialmath.NewPoseFromPoint(highPointInWorld)),
-			bc.conf.Input,
-			nil)
-		if err != nil {
-			return ret, err
-		}
-		highPoint := highPointInCam.Pose().Point()
-
-		highX, highY, err := bc.props.PointToPixel(r3.Vector{highPoint.X, highPoint.Y, highPoint.Z})
-		if err != nil {
-			return ret, fmt.Errorf("PointToPixel failed: %w", err)
-		}
-
-		ret.Detections = append(ret.Detections,
-			objectdetection.NewDetectionWithoutImgBounds(
-				image.Rect(
-					int(highX-5),
-					int(highY-5),
-					int(highX+5),
-					int(highY+5),
-				),
-				1, "x-"+label))
+			ret.Detections[i*2+1] = objectdetection.NewDetectionWithoutImgBounds(
+				image.Rect(int(highX-5), int(highY-5), int(highX+5), int(highY+5)),
+				1, "x-"+label)
+			return nil
+		})
 	}
+	if err := eg2.Wait(); err != nil {
+		span2.End()
+		return ret, err
+	}
+	span2.End()
 
 	return ret, nil
 }
