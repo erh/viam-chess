@@ -38,6 +38,7 @@ var PieceFinderModel = family.WithModel("piece-finder")
 
 const minPieceSize = 25.0
 const squareInset = 10.0
+const otsuSeparationThreshold = 25.0 // min between-class mean separation to count as a piece
 
 func init() {
 	resource.RegisterService(vision.API, PieceFinderModel,
@@ -228,14 +229,19 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 		return nil, outerErr
 	}
 
-	// Phase 3: estimate piece color for each square
+	// Phase 3: estimate piece color for each square.
+	// Depth-based detection is tried first; if inconclusive (sparse point cloud
+	// from IR-absorbing black pieces), fall back to Otsu thresholding on the 2D image.
 	_, span = trace.StartSpan(ctx, "PieceFinder::findBoardAndPieces::EstimateColors")
 	for i := range squares {
 		if subPcs[i].Size() == 0 {
-			span.End()
-			return nil, fmt.Errorf("pc for %s is empty in findBoardAndPieces srcRect: %v", squares[i].name, squares[i].originalBounds)
+			logger.Debugf("pc for %s is empty, will use 2D fallback", squares[i].name)
 		}
-		squares[i].color = estimatePieceColor(subPcs[i])
+		color := estimatePieceColor(subPcs[i])
+		if color == 0 {
+			color = estimatePieceColor2D(srcImg, squares[i].originalBounds)
+		}
+		squares[i].color = color
 		squares[i].pc = subPcs[i]
 	}
 	span.End()
@@ -275,6 +281,88 @@ func estimatePieceColor(pc pointcloud.PointCloud) int {
 		return 1 // white
 	}
 	return 2 // black
+}
+
+// estimatePieceColor2D uses Otsu's thresholding on the 2D image region to classify
+// a piece when point cloud data is too sparse. Returns 0 (empty), 1 (white), 2 (black).
+func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
+	// Build grayscale histogram over the square region.
+	var hist [256]int
+	total := 0
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			// RGBA returns [0,65535]; shift to [0,255].
+			gray := (299*int(r>>8) + 587*int(g>>8) + 114*int(b>>8)) / 1000
+			if gray > 255 {
+				gray = 255
+			}
+			hist[gray]++
+			total++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+
+	// Otsu's method: find threshold t that maximises between-class variance.
+	var sumAll float64
+	for i, n := range hist {
+		sumAll += float64(i) * float64(n)
+	}
+	var sumB float64
+	var wB int
+	maxVar := 0.0
+	threshold := 0
+	for t := 0; t < 256; t++ {
+		wB += hist[t]
+		if wB == 0 {
+			continue
+		}
+		wF := total - wB
+		if wF == 0 {
+			break
+		}
+		sumB += float64(t) * float64(hist[t])
+		meanB := sumB / float64(wB)
+		meanF := (sumAll - sumB) / float64(wF)
+		v := float64(wB) * float64(wF) * (meanB - meanF) * (meanB - meanF)
+		if v > maxVar {
+			maxVar = v
+			threshold = t
+		}
+	}
+
+	// Compute mean brightness of each class.
+	var sumDark, sumLight float64
+	var cntDark, cntLight int
+	for i, n := range hist {
+		if i <= threshold {
+			sumDark += float64(i) * float64(n)
+			cntDark += n
+		} else {
+			sumLight += float64(i) * float64(n)
+			cntLight += n
+		}
+	}
+	if cntDark == 0 || cntLight == 0 {
+		return 0
+	}
+	meanDark := sumDark / float64(cntDark)
+	meanLight := sumLight / float64(cntLight)
+
+	// Separation between class means is lighting-robust (both shift together
+	// under uniform illumination changes).
+	if meanLight-meanDark < otsuSeparationThreshold {
+		return 0 // uniform square — no piece detected
+	}
+
+	// Determine piece color: whichever class mean is more extreme (closer to
+	// pure black or pure white) is the piece.
+	if meanDark < (255 - meanLight) {
+		return 2 // dark class is closer to black — black piece
+	}
+	return 1 // light class is closer to white — white piece
 }
 
 func drawString(dst *image.RGBA, x, y int, s string, c color.Color) {
