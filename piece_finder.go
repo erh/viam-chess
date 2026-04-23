@@ -37,21 +37,41 @@ import (
 
 var PieceFinderModel = family.WithModel("piece-finder")
 
-const minPieceSize = 25.0
-const squareInset = 10.0
-const otsuSeparationThreshold = 25.0 // min between-class mean separation to count as a piece
+// classifyConfig holds the thresholds used by piece-classification helpers.
+type classifyConfig struct {
+	// MinPieceSize is the minimum piece height above the board surface (mm).
+	// Points within this band from the top of the point cloud are treated as
+	// the "top band" used for color classification.
+	MinPieceSize float64
 
-// colorDivergenceGuard rejects the 3D verdict when per-channel |pc-attached
-// color − srcImg color at the projected pixel| averages above this. High
-// divergence means the pointcloud's colors and srcImg are sampling different
-// scenes (timestamp drift, unsynchronised RGB/depth registration), so the
-// 3D classifier cannot be trusted.
-const colorDivergenceGuard = 60.0
+	// SquareInset is the number of pixels to shrink each square's bounding
+	// rectangle inward on each side, to avoid border lines and depth/RGB
+	// alignment artefacts.
+	SquareInset float64
 
-// minTopFootprintMM rejects a 3D verdict when the top-band points span less
-// than this in either x or y. A real piece top has nontrivial 2D extent; a
-// thin sliver is almost always spill-in from a tall neighbouring piece.
-const minTopFootprintMM = 5.0
+	// OtsuSeparationThreshold is the minimum between-class mean separation
+	// required by the 2D Otsu classifier to declare a piece present.
+	OtsuSeparationThreshold float64
+
+	// ColorDivergenceGuard is the maximum tolerated per-channel average
+	// divergence between point-cloud-attached colors and the projected srcImg
+	// pixel colors. Exceeding this rejects the 3D verdict.
+	ColorDivergenceGuard float64
+
+	// MinTopFootprintMM is the minimum 2D extent (mm) the top-band points
+	// must span in both x and y for the 3D verdict to be trusted.
+	MinTopFootprintMM float64
+}
+
+func defaultClassifyConfig() classifyConfig {
+	return classifyConfig{
+		MinPieceSize:            25.0,
+		SquareInset:             10.0,
+		OtsuSeparationThreshold: 25.0,
+		ColorDivergenceGuard:    60.0,
+		MinTopFootprintMM:       5.0,
+	}
+}
 
 func init() {
 	resource.RegisterService(vision.API, PieceFinderModel,
@@ -63,6 +83,12 @@ func init() {
 
 type PieceFinderConfig struct {
 	Input string // this is the cropped camera for the board, TODO: what orientation???
+
+	MinPieceSize            float64 `json:"min-piece-size"`             // default 25.0 mm
+	SquareInset             float64 `json:"square-inset"`               // default 10.0 px
+	OtsuSeparationThreshold float64 `json:"otsu-separation-threshold"`  // default 25.0
+	ColorDivergenceGuard    float64 `json:"color-divergence-guard"`     // default 60.0
+	MinTopFootprintMM       float64 `json:"min-top-footprint-mm"`       // default 5.0 mm
 }
 
 func (cfg *PieceFinderConfig) Validate(path string) ([]string, []string, error) {
@@ -70,6 +96,26 @@ func (cfg *PieceFinderConfig) Validate(path string) ([]string, []string, error) 
 		return nil, nil, fmt.Errorf("need an input")
 	}
 	return []string{cfg.Input}, nil, nil
+}
+
+func (cfg *PieceFinderConfig) toClassifyConfig() classifyConfig {
+	cc := defaultClassifyConfig()
+	if cfg.MinPieceSize > 0 {
+		cc.MinPieceSize = cfg.MinPieceSize
+	}
+	if cfg.SquareInset > 0 {
+		cc.SquareInset = cfg.SquareInset
+	}
+	if cfg.OtsuSeparationThreshold > 0 {
+		cc.OtsuSeparationThreshold = cfg.OtsuSeparationThreshold
+	}
+	if cfg.ColorDivergenceGuard > 0 {
+		cc.ColorDivergenceGuard = cfg.ColorDivergenceGuard
+	}
+	if cfg.MinTopFootprintMM > 0 {
+		cc.MinTopFootprintMM = cfg.MinTopFootprintMM
+	}
+	return cc
 }
 
 func newPieceFinder(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (vision.Service, error) {
@@ -138,7 +184,7 @@ func scale(start, end int, amount float64) int {
 	return int(float64(end-start)*amount) + start
 }
 
-func computeSquareBounds(corners []image.Point, col, row int) image.Rectangle {
+func computeSquareBounds(corners []image.Point, col, row int, squareInset float64) image.Rectangle {
 
 	colTopLeft := image.Point{
 		scale(corners[0].X, corners[1].X, float64(col)/8),
@@ -175,7 +221,7 @@ func computeSquareBounds(corners []image.Point, col, row int) image.Rectangle {
 	// Add inset to avoid capturing border lines between squares
 	// and to account for depth/RGB alignment issues
 	// Shrink by 10 pixels on each side to stay well within the square
-	inset := min(squareInset, (bounds.Max.X-bounds.Min.X)/10)
+	inset := min(int(squareInset), (bounds.Max.X-bounds.Min.X)/10)
 	bounds.Min.X += inset
 	bounds.Min.Y += inset
 	bounds.Max.X -= inset
@@ -184,7 +230,7 @@ func computeSquareBounds(corners []image.Point, col, row int) image.Rectangle {
 	return bounds
 }
 
-func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties, logger logging.Logger) ([]squareInfo, error) {
+func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties, logger logging.Logger, cc classifyConfig) ([]squareInfo, error) {
 
 	corners, err := findBoard(srcImg)
 	if err != nil {
@@ -205,7 +251,7 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
 			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
-			srcRect := computeSquareBounds(corners, int('h'-file), rank-1)
+			srcRect := computeSquareBounds(corners, int('h'-file), rank-1, cc.SquareInset)
 			squares = append(squares, squareInfo{
 				rank:           rank,
 				file:           file,
@@ -252,7 +298,7 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 		if subPcs[i].Size() == 0 {
 			logger.Debugf("pc for %s is empty, will use 2D fallback", squares[i].name)
 		}
-		squares[i].color = classifyPieceColor(subPcs[i], srcImg, squares[i].originalBounds, props)
+		squares[i].color = classifyPieceColor(subPcs[i], srcImg, squares[i].originalBounds, props, cc)
 		squares[i].pc = subPcs[i]
 	}
 	span.End()
@@ -284,7 +330,7 @@ func (d colorDiag3D) asMap() map[string]interface{} {
 	}
 }
 
-func colorFromPC(pc pointcloud.PointCloud) colorDiag3D {
+func colorFromPC(pc pointcloud.PointCloud, minPieceSize float64) colorDiag3D {
 	maxZ := pc.MetaData().MaxZ
 	minZ := maxZ - minPieceSize
 	var totalR, totalG, totalB float64
@@ -317,7 +363,7 @@ func colorFromPC(pc pointcloud.PointCloud) colorDiag3D {
 
 // 0 - blank, 1 - white, 2 - black
 func estimatePieceColor(pc pointcloud.PointCloud) int {
-	return colorFromPC(pc).Color
+	return colorFromPC(pc, defaultClassifyConfig().MinPieceSize).Color
 }
 
 type pointSample struct {
@@ -384,14 +430,14 @@ func (d pcDiag3DExtra) color() int {
 
 // rejectReason returns a short human-readable reason if the 3D verdict should
 // be rejected by the guards, or "" if the verdict is trusted.
-func (d pcDiag3DExtra) rejectReason() string {
-	if d.TopColorDivergence > colorDivergenceGuard {
-		return fmt.Sprintf("color divergence %.1f > %.1f", d.TopColorDivergence, colorDivergenceGuard)
+func (d pcDiag3DExtra) rejectReason(colorDivGuard, minFootprintMM float64) string {
+	if d.TopColorDivergence > colorDivGuard {
+		return fmt.Sprintf("color divergence %.1f > %.1f", d.TopColorDivergence, colorDivGuard)
 	}
 	fpX := d.TopMaxX - d.TopMinX
 	fpY := d.TopMaxY - d.TopMinY
-	if fpX < minTopFootprintMM || fpY < minTopFootprintMM {
-		return fmt.Sprintf("top footprint %.1fx%.1f mm below %.1f mm", fpX, fpY, minTopFootprintMM)
+	if fpX < minFootprintMM || fpY < minFootprintMM {
+		return fmt.Sprintf("top footprint %.1fx%.1f mm below %.1f mm", fpX, fpY, minFootprintMM)
 	}
 	return ""
 }
@@ -399,11 +445,11 @@ func (d pcDiag3DExtra) rejectReason() string {
 // classifyPieceColor returns 0/1/2 using the guarded 3D classifier. If the 3D
 // verdict is rejected (empty band, colors diverge from srcImg, or footprint is
 // too small) it falls back to the 2D Otsu path.
-func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties) int {
-	d3x := pcDiagnose3D(pc, img, props, 0)
+func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties, cc classifyConfig) int {
+	d3x := pcDiagnose3D(pc, img, props, 0, cc.MinPieceSize)
 	c := d3x.color()
-	if c == 0 || d3x.rejectReason() != "" {
-		return colorFromImage2D(img, rect).Color
+	if c == 0 || d3x.rejectReason(cc.ColorDivergenceGuard, cc.MinTopFootprintMM) != "" {
+		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
 	}
 	return c
 }
@@ -440,7 +486,7 @@ func (d pcDiag3DExtra) asMap() map[string]interface{} {
 	}
 }
 
-func pcDiagnose3D(pc pointcloud.PointCloud, img image.Image, props camera.Properties, maxSamples int) pcDiag3DExtra {
+func pcDiagnose3D(pc pointcloud.PointCloud, img image.Image, props camera.Properties, maxSamples int, minPieceSize float64) pcDiag3DExtra {
 	out := pcDiag3DExtra{TotalCount: pc.Size()}
 	if pc.Size() == 0 {
 		return out
@@ -590,7 +636,7 @@ func (d colorDiag2D) asMap() map[string]interface{} {
 
 // colorFromImage2D runs Otsu's threshold on the 2D image region and returns
 // all intermediate values alongside the classification (0 empty, 1 white, 2 black).
-func colorFromImage2D(img image.Image, rect image.Rectangle) colorDiag2D {
+func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh float64) colorDiag2D {
 	var hist [256]int
 	total := 0
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
@@ -660,7 +706,7 @@ func colorFromImage2D(img image.Image, rect image.Rectangle) colorDiag2D {
 
 	// Low separation means a uniform square; lighting-robust because both
 	// class means shift together under illumination changes.
-	if diag.Separation < otsuSeparationThreshold {
+	if diag.Separation < otsuSepThresh {
 		return diag
 	}
 	// Piece color is whichever class is more extreme (closer to pure black/white).
@@ -673,7 +719,7 @@ func colorFromImage2D(img image.Image, rect image.Rectangle) colorDiag2D {
 }
 
 func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
-	return colorFromImage2D(img, rect).Color
+	return colorFromImage2D(img, rect, defaultClassifyConfig().OtsuSeparationThreshold).Color
 }
 
 func drawString(dst *image.RGBA, x, y int, s string, c color.Color) {
@@ -730,6 +776,8 @@ func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int,
 		return nil, fmt.Errorf("findBoard: %w", err)
 	}
 
+	cc := bc.conf.toClassifyConfig()
+
 	type bucket struct {
 		name   string
 		bounds image.Rectangle
@@ -739,7 +787,7 @@ func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int,
 	for rank := 1; rank <= 8; rank++ {
 		for file := 'a'; file <= 'h'; file++ {
 			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
-			rect := computeSquareBounds(corners, int('h'-file), rank-1)
+			rect := computeSquareBounds(corners, int('h'-file), rank-1, cc.SquareInset)
 			buckets = append(buckets, bucket{name: name, bounds: rect, pc: pointcloud.NewBasicEmpty()})
 		}
 	}
@@ -783,13 +831,13 @@ func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int,
 		if filter != "" && b.name != filter {
 			continue
 		}
-		d3 := colorFromPC(b.pc)
-		d2 := colorFromImage2D(img, b.bounds)
-		d3x := pcDiagnose3D(b.pc, img, bc.props, samples)
+		d3 := colorFromPC(b.pc, cc.MinPieceSize)
+		d2 := colorFromImage2D(img, b.bounds, cc.OtsuSeparationThreshold)
+		d3x := pcDiagnose3D(b.pc, img, bc.props, samples, cc.MinPieceSize)
 
 		rejectReason := ""
 		if d3.Color != 0 {
-			rejectReason = d3x.rejectReason()
+			rejectReason = d3x.rejectReason(cc.ColorDivergenceGuard, cc.MinTopFootprintMM)
 		}
 		final := d3.Color
 		if final == 0 || rejectReason != "" {
@@ -912,7 +960,7 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 	}
 
 	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::findBoardAndPieces")
-	squares, err := findBoardAndPieces(ctx, ret.Image, pc, bc.props, bc.logger)
+	squares, err := findBoardAndPieces(ctx, ret.Image, pc, bc.props, bc.logger, bc.conf.toClassifyConfig())
 	span2.End()
 	if err != nil {
 		if extra != nil && extra["debug"] == true {

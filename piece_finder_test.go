@@ -30,7 +30,7 @@ func TestComputeSquareBounds(t *testing.T) {
 		{0, 80},
 	}
 
-	res := computeSquareBounds(corners, 0, 0)
+	res := computeSquareBounds(corners, 0, 0, defaultClassifyConfig().SquareInset)
 	test.That(t, res.Min.X, test.ShouldEqual, 1)
 	test.That(t, res.Min.Y, test.ShouldEqual, 1)
 
@@ -44,11 +44,11 @@ func TestComputeSquareBounds(t *testing.T) {
 		{257, 680},
 	}
 
-	res = computeSquareBounds(corners, 0, 0)
+	res = computeSquareBounds(corners, 0, 0, defaultClassifyConfig().SquareInset)
 	test.That(t, res.Min.X, test.ShouldEqual, 366)
 	test.That(t, res.Min.Y, test.ShouldEqual, 9)
 
-	res = computeSquareBounds(corners, 0, 6)
+	res = computeSquareBounds(corners, 0, 6, defaultClassifyConfig().SquareInset)
 	test.That(t, res.Min.X, test.ShouldEqual, 290)
 	test.That(t, res.Min.Y, test.ShouldEqual, 517)
 
@@ -66,7 +66,7 @@ func testBoardPiece(t *testing.T, boardName string) {
 	pc, err := pointcloud.NewFromFile(pcdFile, "")
 	test.That(t, err, test.ShouldBeNil)
 
-	squares, err := findBoardAndPieces(context.Background(), input, pc, touch.RealSensePropertiesD435At1280by720, logger)
+	squares, err := findBoardAndPieces(context.Background(), input, pc, touch.RealSensePropertiesD435At1280by720, logger, defaultClassifyConfig())
 	test.That(t, err, test.ShouldBeNil)
 
 	// Create debug image with square labels
@@ -122,7 +122,7 @@ func TestBoard13E2Pointcloud(t *testing.T) {
 	pc, err := pointcloud.NewFromFile("data/board13.pcd", "")
 	test.That(t, err, test.ShouldBeNil)
 
-	squares, err := findBoardAndPieces(context.Background(), input, pc, touch.RealSensePropertiesD435At1280by720, logger)
+	squares, err := findBoardAndPieces(context.Background(), input, pc, touch.RealSensePropertiesD435At1280by720, logger, defaultClassifyConfig())
 	test.That(t, err, test.ShouldBeNil)
 
 	// Find the e2 square
