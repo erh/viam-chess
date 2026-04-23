@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 	"os"
 	"strings"
 
@@ -39,6 +40,18 @@ var PieceFinderModel = family.WithModel("piece-finder")
 const minPieceSize = 25.0
 const squareInset = 10.0
 const otsuSeparationThreshold = 25.0 // min between-class mean separation to count as a piece
+
+// colorDivergenceGuard rejects the 3D verdict when per-channel |pc-attached
+// color − srcImg color at the projected pixel| averages above this. High
+// divergence means the pointcloud's colors and srcImg are sampling different
+// scenes (timestamp drift, unsynchronised RGB/depth registration), so the
+// 3D classifier cannot be trusted.
+const colorDivergenceGuard = 60.0
+
+// minTopFootprintMM rejects a 3D verdict when the top-band points span less
+// than this in either x or y. A real piece top has nontrivial 2D extent; a
+// thin sliver is almost always spill-in from a tall neighbouring piece.
+const minTopFootprintMM = 5.0
 
 func init() {
 	resource.RegisterService(vision.API, PieceFinderModel,
@@ -229,19 +242,17 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 		return nil, outerErr
 	}
 
-	// Phase 3: estimate piece color for each square.
-	// Depth-based detection is tried first; if inconclusive (sparse point cloud
-	// from IR-absorbing black pieces), fall back to Otsu thresholding on the 2D image.
+	// Phase 3: estimate piece color for each square. The 3D classifier is tried
+	// first; its verdict is guarded by a color-divergence check (pc colors must
+	// match srcImg at the projected pixels) and a footprint check (top-band
+	// points must span at least minTopFootprintMM in x and y). If the 3D path
+	// returns 0 or is rejected by the guards, fall back to Otsu on the 2D image.
 	_, span = trace.StartSpan(ctx, "PieceFinder::findBoardAndPieces::EstimateColors")
 	for i := range squares {
 		if subPcs[i].Size() == 0 {
 			logger.Debugf("pc for %s is empty, will use 2D fallback", squares[i].name)
 		}
-		color := estimatePieceColor(subPcs[i])
-		if color == 0 {
-			color = estimatePieceColor2D(srcImg, squares[i].originalBounds)
-		}
-		squares[i].color = color
+		squares[i].color = classifyPieceColor(subPcs[i], srcImg, squares[i].originalBounds, props)
 		squares[i].pc = subPcs[i]
 	}
 	span.End()
@@ -249,12 +260,35 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 	return squares, nil
 }
 
-// 0 - blank, 1 - white, 2 - black
-func estimatePieceColor(pc pointcloud.PointCloud) int {
-	minZ := pc.MetaData().MaxZ - minPieceSize
+type colorDiag3D struct {
+	NearTopCount int
+	MaxZ         float64
+	MinZCutoff   float64
+	AvgR         float64
+	AvgG         float64
+	AvgB         float64
+	Brightness   float64
+	Color        int
+}
+
+func (d colorDiag3D) asMap() map[string]interface{} {
+	return map[string]interface{}{
+		"near_top_count": d.NearTopCount,
+		"max_z":          d.MaxZ,
+		"min_z_cutoff":   d.MinZCutoff,
+		"avg_r":          d.AvgR,
+		"avg_g":          d.AvgG,
+		"avg_b":          d.AvgB,
+		"brightness":     d.Brightness,
+		"color":          d.Color,
+	}
+}
+
+func colorFromPC(pc pointcloud.PointCloud) colorDiag3D {
+	maxZ := pc.MetaData().MaxZ
+	minZ := maxZ - minPieceSize
 	var totalR, totalG, totalB float64
 	count := 0
-
 	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
 		if p.Z < minZ && d != nil && d.HasColor() {
 			r, g, b := d.RGB255()
@@ -265,28 +299,298 @@ func estimatePieceColor(pc pointcloud.PointCloud) int {
 		}
 		return true
 	})
-
+	diag := colorDiag3D{NearTopCount: count, MaxZ: maxZ, MinZCutoff: minZ}
 	if count <= 10 {
-		return 0 // blank - no piece detected
+		return diag
 	}
-
-	// calculate average brightness
-	avgR := totalR / float64(count)
-	avgG := totalG / float64(count)
-	avgB := totalB / float64(count)
-	brightness := (avgR + avgG + avgB) / 3.0
-
-	// threshold to distinguish white vs black pieces
-	if brightness > 128 {
-		return 1 // white
+	diag.AvgR = totalR / float64(count)
+	diag.AvgG = totalG / float64(count)
+	diag.AvgB = totalB / float64(count)
+	diag.Brightness = (diag.AvgR + diag.AvgG + diag.AvgB) / 3.0
+	if diag.Brightness > 128 {
+		diag.Color = 1
+	} else {
+		diag.Color = 2
 	}
-	return 2 // black
+	return diag
 }
 
-// estimatePieceColor2D uses Otsu's thresholding on the 2D image region to classify
-// a piece when point cloud data is too sparse. Returns 0 (empty), 1 (white), 2 (black).
-func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
-	// Build grayscale histogram over the square region.
+// 0 - blank, 1 - white, 2 - black
+func estimatePieceColor(pc pointcloud.PointCloud) int {
+	return colorFromPC(pc).Color
+}
+
+type pointSample struct {
+	X, Y, Z                         float64
+	PixelX, PixelY                  int
+	AttachedR, AttachedG, AttachedB uint8
+	ImgR, ImgG, ImgB                uint8
+}
+
+func (s pointSample) asMap() map[string]interface{} {
+	return map[string]interface{}{
+		"x":          s.X,
+		"y":          s.Y,
+		"z":          s.Z,
+		"pixel_x":    s.PixelX,
+		"pixel_y":    s.PixelY,
+		"attached_r": int(s.AttachedR),
+		"attached_g": int(s.AttachedG),
+		"attached_b": int(s.AttachedB),
+		"img_r":      int(s.ImgR),
+		"img_g":      int(s.ImgG),
+		"img_b":      int(s.ImgB),
+	}
+}
+
+// pcDiag3DExtra captures the full 3D context around a bucket's classification:
+// the pc's spatial extent, the top-band subset's extent, a per-channel comparison
+// between colors baked into the pointcloud and colors read from srcImg at the
+// points' projected pixels, and up to maxSamples individual rows of both.
+type pcDiag3DExtra struct {
+	TotalCount       int
+	MinX, MaxX       float64
+	MinY, MaxY       float64
+	MinZ, MaxZ       float64
+	TopCount         int
+	TopColoredCount  int
+	TopMinX, TopMaxX float64
+	TopMinY, TopMaxY float64
+	TopMinZ, TopMaxZ float64
+
+	TopMeanAttachedR   float64
+	TopMeanAttachedG   float64
+	TopMeanAttachedB   float64
+	TopMeanImgR        float64
+	TopMeanImgG        float64
+	TopMeanImgB        float64
+	TopColorDivergence float64
+
+	Samples []pointSample
+}
+
+// color returns the 3D verdict (0/1/2) using the same count/brightness
+// thresholds as colorFromPC, but derived from the precomputed top-band stats.
+func (d pcDiag3DExtra) color() int {
+	if d.TopColoredCount <= 10 {
+		return 0
+	}
+	brightness := (d.TopMeanAttachedR + d.TopMeanAttachedG + d.TopMeanAttachedB) / 3.0
+	if brightness > 128 {
+		return 1
+	}
+	return 2
+}
+
+// rejectReason returns a short human-readable reason if the 3D verdict should
+// be rejected by the guards, or "" if the verdict is trusted.
+func (d pcDiag3DExtra) rejectReason() string {
+	if d.TopColorDivergence > colorDivergenceGuard {
+		return fmt.Sprintf("color divergence %.1f > %.1f", d.TopColorDivergence, colorDivergenceGuard)
+	}
+	fpX := d.TopMaxX - d.TopMinX
+	fpY := d.TopMaxY - d.TopMinY
+	if fpX < minTopFootprintMM || fpY < minTopFootprintMM {
+		return fmt.Sprintf("top footprint %.1fx%.1f mm below %.1f mm", fpX, fpY, minTopFootprintMM)
+	}
+	return ""
+}
+
+// classifyPieceColor returns 0/1/2 using the guarded 3D classifier. If the 3D
+// verdict is rejected (empty band, colors diverge from srcImg, or footprint is
+// too small) it falls back to the 2D Otsu path.
+func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties) int {
+	d3x := pcDiagnose3D(pc, img, props, 0)
+	c := d3x.color()
+	if c == 0 || d3x.rejectReason() != "" {
+		return colorFromImage2D(img, rect).Color
+	}
+	return c
+}
+
+func (d pcDiag3DExtra) asMap() map[string]interface{} {
+	samples := make([]map[string]interface{}, 0, len(d.Samples))
+	for _, s := range d.Samples {
+		samples = append(samples, s.asMap())
+	}
+	return map[string]interface{}{
+		"total_count":          d.TotalCount,
+		"min_x":                d.MinX,
+		"max_x":                d.MaxX,
+		"min_y":                d.MinY,
+		"max_y":                d.MaxY,
+		"min_z":                d.MinZ,
+		"max_z":                d.MaxZ,
+		"top_count":            d.TopCount,
+		"top_colored_count":    d.TopColoredCount,
+		"top_min_x":            d.TopMinX,
+		"top_max_x":            d.TopMaxX,
+		"top_min_y":            d.TopMinY,
+		"top_max_y":            d.TopMaxY,
+		"top_min_z":            d.TopMinZ,
+		"top_max_z":            d.TopMaxZ,
+		"top_mean_attached_r":  d.TopMeanAttachedR,
+		"top_mean_attached_g":  d.TopMeanAttachedG,
+		"top_mean_attached_b":  d.TopMeanAttachedB,
+		"top_mean_img_r":       d.TopMeanImgR,
+		"top_mean_img_g":       d.TopMeanImgG,
+		"top_mean_img_b":       d.TopMeanImgB,
+		"top_color_divergence": d.TopColorDivergence,
+		"samples":              samples,
+	}
+}
+
+func pcDiagnose3D(pc pointcloud.PointCloud, img image.Image, props camera.Properties, maxSamples int) pcDiag3DExtra {
+	out := pcDiag3DExtra{TotalCount: pc.Size()}
+	if pc.Size() == 0 {
+		return out
+	}
+	out.MinX, out.MaxX = math.Inf(1), math.Inf(-1)
+	out.MinY, out.MaxY = math.Inf(1), math.Inf(-1)
+	out.MinZ, out.MaxZ = math.Inf(1), math.Inf(-1)
+	out.TopMinX, out.TopMaxX = math.Inf(1), math.Inf(-1)
+	out.TopMinY, out.TopMaxY = math.Inf(1), math.Inf(-1)
+	out.TopMinZ, out.TopMaxZ = math.Inf(1), math.Inf(-1)
+
+	minZCutoff := pc.MetaData().MaxZ - minPieceSize
+	imgBounds := img.Bounds()
+
+	var sumAR, sumAG, sumAB, sumIR, sumIG, sumIB, sumDiv float64
+	topColored := 0
+
+	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		if p.X < out.MinX {
+			out.MinX = p.X
+		}
+		if p.X > out.MaxX {
+			out.MaxX = p.X
+		}
+		if p.Y < out.MinY {
+			out.MinY = p.Y
+		}
+		if p.Y > out.MaxY {
+			out.MaxY = p.Y
+		}
+		if p.Z < out.MinZ {
+			out.MinZ = p.Z
+		}
+		if p.Z > out.MaxZ {
+			out.MaxZ = p.Z
+		}
+
+		if p.Z >= minZCutoff {
+			return true
+		}
+
+		if p.X < out.TopMinX {
+			out.TopMinX = p.X
+		}
+		if p.X > out.TopMaxX {
+			out.TopMaxX = p.X
+		}
+		if p.Y < out.TopMinY {
+			out.TopMinY = p.Y
+		}
+		if p.Y > out.TopMaxY {
+			out.TopMaxY = p.Y
+		}
+		if p.Z < out.TopMinZ {
+			out.TopMinZ = p.Z
+		}
+		if p.Z > out.TopMaxZ {
+			out.TopMaxZ = p.Z
+		}
+		out.TopCount++
+
+		if d == nil || !d.HasColor() {
+			return true
+		}
+		pr, pg, pb := d.RGB255()
+		px, py, err := props.PointToPixel(p)
+		if err != nil {
+			return true
+		}
+		ix, iy := int(px), int(py)
+
+		var ir, ig, ib uint8
+		inImg := ix >= imgBounds.Min.X && ix < imgBounds.Max.X && iy >= imgBounds.Min.Y && iy < imgBounds.Max.Y
+		if inImg {
+			cr, cg, cb, _ := img.At(ix, iy).RGBA()
+			ir = uint8(cr >> 8)
+			ig = uint8(cg >> 8)
+			ib = uint8(cb >> 8)
+		}
+
+		sumAR += float64(pr)
+		sumAG += float64(pg)
+		sumAB += float64(pb)
+		if inImg {
+			sumIR += float64(ir)
+			sumIG += float64(ig)
+			sumIB += float64(ib)
+			sumDiv += (math.Abs(float64(pr)-float64(ir)) +
+				math.Abs(float64(pg)-float64(ig)) +
+				math.Abs(float64(pb)-float64(ib))) / 3.0
+		}
+		topColored++
+		out.TopColoredCount++
+
+		if len(out.Samples) < maxSamples {
+			out.Samples = append(out.Samples, pointSample{
+				X: p.X, Y: p.Y, Z: p.Z,
+				PixelX: ix, PixelY: iy,
+				AttachedR: pr, AttachedG: pg, AttachedB: pb,
+				ImgR: ir, ImgG: ig, ImgB: ib,
+			})
+		}
+		return true
+	})
+
+	if topColored > 0 {
+		out.TopMeanAttachedR = sumAR / float64(topColored)
+		out.TopMeanAttachedG = sumAG / float64(topColored)
+		out.TopMeanAttachedB = sumAB / float64(topColored)
+		out.TopMeanImgR = sumIR / float64(topColored)
+		out.TopMeanImgG = sumIG / float64(topColored)
+		out.TopMeanImgB = sumIB / float64(topColored)
+		out.TopColorDivergence = sumDiv / float64(topColored)
+	}
+
+	if out.TopCount == 0 {
+		out.TopMinX, out.TopMaxX = 0, 0
+		out.TopMinY, out.TopMaxY = 0, 0
+		out.TopMinZ, out.TopMaxZ = 0, 0
+	}
+	return out
+}
+
+type colorDiag2D struct {
+	Total      int
+	Threshold  int
+	MeanDark   float64
+	MeanLight  float64
+	CntDark    int
+	CntLight   int
+	Separation float64
+	Color      int
+}
+
+func (d colorDiag2D) asMap() map[string]interface{} {
+	return map[string]interface{}{
+		"total":      d.Total,
+		"threshold":  d.Threshold,
+		"mean_dark":  d.MeanDark,
+		"mean_light": d.MeanLight,
+		"cnt_dark":   d.CntDark,
+		"cnt_light":  d.CntLight,
+		"separation": d.Separation,
+		"color":      d.Color,
+	}
+}
+
+// colorFromImage2D runs Otsu's threshold on the 2D image region and returns
+// all intermediate values alongside the classification (0 empty, 1 white, 2 black).
+func colorFromImage2D(img image.Image, rect image.Rectangle) colorDiag2D {
 	var hist [256]int
 	total := 0
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
@@ -301,11 +605,11 @@ func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
 			total++
 		}
 	}
+	diag := colorDiag2D{Total: total}
 	if total == 0 {
-		return 0
+		return diag
 	}
 
-	// Otsu's method: find threshold t that maximises between-class variance.
 	var sumAll float64
 	for i, n := range hist {
 		sumAll += float64(i) * float64(n)
@@ -332,8 +636,8 @@ func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
 			threshold = t
 		}
 	}
+	diag.Threshold = threshold
 
-	// Compute mean brightness of each class.
 	var sumDark, sumLight float64
 	var cntDark, cntLight int
 	for i, n := range hist {
@@ -345,24 +649,31 @@ func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
 			cntLight += n
 		}
 	}
+	diag.CntDark = cntDark
+	diag.CntLight = cntLight
 	if cntDark == 0 || cntLight == 0 {
-		return 0
+		return diag
 	}
-	meanDark := sumDark / float64(cntDark)
-	meanLight := sumLight / float64(cntLight)
+	diag.MeanDark = sumDark / float64(cntDark)
+	diag.MeanLight = sumLight / float64(cntLight)
+	diag.Separation = diag.MeanLight - diag.MeanDark
 
-	// Separation between class means is lighting-robust (both shift together
-	// under uniform illumination changes).
-	if meanLight-meanDark < otsuSeparationThreshold {
-		return 0 // uniform square — no piece detected
+	// Low separation means a uniform square; lighting-robust because both
+	// class means shift together under illumination changes.
+	if diag.Separation < otsuSeparationThreshold {
+		return diag
 	}
+	// Piece color is whichever class is more extreme (closer to pure black/white).
+	if diag.MeanDark < (255 - diag.MeanLight) {
+		diag.Color = 2
+	} else {
+		diag.Color = 1
+	}
+	return diag
+}
 
-	// Determine piece color: whichever class mean is more extreme (closer to
-	// pure black or pure white) is the piece.
-	if meanDark < (255 - meanLight) {
-		return 2 // dark class is closer to black — black piece
-	}
-	return 1 // light class is closer to white — white piece
+func estimatePieceColor2D(img image.Image, rect image.Rectangle) int {
+	return colorFromImage2D(img, rect).Color
 }
 
 func drawString(dst *image.RGBA, x, y int, s string, c color.Color) {
@@ -376,7 +687,160 @@ func drawString(dst *image.RGBA, x, y int, s string, c color.Color) {
 }
 
 func (bc *PieceFinder) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("DoCommand not supported")
+	action, _ := cmd["cmd"].(string)
+	switch action {
+	case "diagnose":
+		square, _ := cmd["square"].(string)
+		saveDebug, _ := cmd["save_debug"].(bool)
+		samples := 10
+		if v, ok := cmd["samples"].(float64); ok && v > 0 {
+			samples = int(v)
+		}
+		return bc.diagnose(ctx, square, samples, saveDebug)
+	default:
+		return nil, fmt.Errorf("unknown command %q", action)
+	}
+}
+
+// diagnose captures a fresh frame, partitions it into 64 squares, and returns
+// the full 3D and 2D color-classification intermediates per square plus a
+// per-point comparison between the colors baked into the pointcloud and the
+// colors in srcImg at those points' projected pixels. Pass a "square" filter
+// to restrict output, "samples" to cap the per-square sample count, and
+// "save_debug" to write the RGB frame, annotated rect, and sub-PCD to disk.
+func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int, saveDebug bool) (map[string]interface{}, error) {
+	ni, _, err := bc.input.Images(ctx, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("images: %w", err)
+	}
+	if len(ni) == 0 {
+		return nil, fmt.Errorf("no images returned")
+	}
+	pc, err := bc.input.NextPointCloud(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("pointcloud: %w", err)
+	}
+	img, err := ni[0].Image(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	corners, err := findBoard(img)
+	if err != nil {
+		return nil, fmt.Errorf("findBoard: %w", err)
+	}
+
+	type bucket struct {
+		name   string
+		bounds image.Rectangle
+		pc     pointcloud.PointCloud
+	}
+	buckets := make([]bucket, 0, 64)
+	for rank := 1; rank <= 8; rank++ {
+		for file := 'a'; file <= 'h'; file++ {
+			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
+			rect := computeSquareBounds(corners, int('h'-file), rank-1)
+			buckets = append(buckets, bucket{name: name, bounds: rect, pc: pointcloud.NewBasicEmpty()})
+		}
+	}
+
+	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		x, y, perr := bc.props.PointToPixel(p)
+		if perr != nil {
+			return false
+		}
+		ix, iy := int(x), int(y)
+		for i := range buckets {
+			b := buckets[i].bounds
+			if ix >= b.Min.X && ix <= b.Max.X && iy >= b.Min.Y && iy <= b.Max.Y {
+				buckets[i].pc.Set(p, d)
+				break
+			}
+		}
+		return true
+	})
+
+	debugFiles := []string{}
+	if saveDebug {
+		if err := rimage.SaveImage(img, "piece-finder-diag.jpg"); err != nil {
+			bc.logger.Warnf("save rgb: %v", err)
+		} else {
+			debugFiles = append(debugFiles, "piece-finder-diag.jpg")
+		}
+		if f, err := os.Create("piece-finder-diag.pcd"); err != nil {
+			bc.logger.Warnf("create full pcd: %v", err)
+		} else {
+			if err := pointcloud.ToPCD(pc, f, pointcloud.PCDBinary); err != nil {
+				bc.logger.Warnf("write full pcd: %v", err)
+			}
+			f.Close()
+			debugFiles = append(debugFiles, "piece-finder-diag.pcd")
+		}
+	}
+
+	results := make([]map[string]interface{}, 0, len(buckets))
+	for _, b := range buckets {
+		if filter != "" && b.name != filter {
+			continue
+		}
+		d3 := colorFromPC(b.pc)
+		d2 := colorFromImage2D(img, b.bounds)
+		d3x := pcDiagnose3D(b.pc, img, bc.props, samples)
+
+		rejectReason := ""
+		if d3.Color != 0 {
+			rejectReason = d3x.rejectReason()
+		}
+		final := d3.Color
+		if final == 0 || rejectReason != "" {
+			final = d2.Color
+		}
+
+		row := map[string]interface{}{
+			"square":           b.name,
+			"bounds":           []int{b.bounds.Min.X, b.bounds.Min.Y, b.bounds.Max.X, b.bounds.Max.Y},
+			"pc_size":          b.pc.Size(),
+			"d3":               d3.asMap(),
+			"d2":               d2.asMap(),
+			"d3x":              d3x.asMap(),
+			"final_color":      final,
+			"3d_reject_reason": rejectReason,
+		}
+
+		if saveDebug {
+			rectPath := fmt.Sprintf("piece-finder-diag-%s-rect.jpg", b.name)
+			if err := saveAnnotatedImage(img, b.bounds, rectPath); err != nil {
+				bc.logger.Warnf("save annotated: %v", err)
+			} else {
+				row["annotated_image"] = rectPath
+			}
+			pcdPath := fmt.Sprintf("piece-finder-diag-%s.pcd", b.name)
+			if f, err := os.Create(pcdPath); err != nil {
+				bc.logger.Warnf("create sub pcd: %v", err)
+			} else {
+				if err := pointcloud.ToPCD(b.pc, f, pointcloud.PCDBinary); err != nil {
+					bc.logger.Warnf("write sub pcd: %v", err)
+				}
+				f.Close()
+				row["sub_pcd"] = pcdPath
+			}
+		}
+
+		results = append(results, row)
+	}
+
+	return map[string]interface{}{
+		"squares":     results,
+		"debug_files": debugFiles,
+	}, nil
+}
+
+func saveAnnotatedImage(src image.Image, rect image.Rectangle, path string) error {
+	b := src.Bounds()
+	dst := image.NewRGBA(b)
+	draw.Draw(dst, b, src, image.Point{}, draw.Src)
+	drawRect(dst, rect, color.RGBA{255, 0, 0, 255})
+	return rimage.SaveImage(dst, path)
 }
 
 func (bc *PieceFinder) Name() resource.Name {
