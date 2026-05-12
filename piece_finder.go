@@ -61,6 +61,14 @@ type classifyConfig struct {
 	// MinTopFootprintMM is the minimum 2D extent (mm) the top-band points
 	// must span in both x and y for the 3D verdict to be trusted.
 	MinTopFootprintMM float64
+
+	// BrightnessThreshold is the mean-RGB cutoff between black (color=2) and
+	// white (color=1). Pieces in real chess sets are often cream/ivory rather
+	// than pure white, averaging brightness ~115–135 under typical lighting,
+	// so the historical default of 128 sits right where borderline pieces
+	// flip frame-to-frame. Tune lower (e.g. 110) if light pieces classify as
+	// black; raise if shadows on dark pieces classify as white.
+	BrightnessThreshold float64
 }
 
 func defaultClassifyConfig() classifyConfig {
@@ -70,6 +78,7 @@ func defaultClassifyConfig() classifyConfig {
 		OtsuSeparationThreshold: 25.0,
 		ColorDivergenceGuard:    60.0,
 		MinTopFootprintMM:       5.0,
+		BrightnessThreshold:     128.0,
 	}
 }
 
@@ -84,11 +93,12 @@ func init() {
 type PieceFinderConfig struct {
 	Input string // this is the cropped camera for the board, TODO: what orientation???
 
-	MinPieceSize            float64 `json:"min-piece-size"`             // default 25.0 mm
-	SquareInset             float64 `json:"square-inset"`               // default 10.0 px
-	OtsuSeparationThreshold float64 `json:"otsu-separation-threshold"`  // default 25.0
-	ColorDivergenceGuard    float64 `json:"color-divergence-guard"`     // default 60.0
-	MinTopFootprintMM       float64 `json:"min-top-footprint-mm"`       // default 5.0 mm
+	MinPieceSize            float64 `json:"min-piece-size"`            // default 25.0 mm
+	SquareInset             float64 `json:"square-inset"`              // default 10.0 px
+	OtsuSeparationThreshold float64 `json:"otsu-separation-threshold"` // default 25.0
+	ColorDivergenceGuard    float64 `json:"color-divergence-guard"`    // default 60.0
+	MinTopFootprintMM       float64 `json:"min-top-footprint-mm"`      // default 5.0 mm
+	BrightnessThreshold     float64 `json:"brightness-threshold"`      // default 128.0 (mean RGB)
 }
 
 func (cfg *PieceFinderConfig) Validate(path string) ([]string, []string, error) {
@@ -114,6 +124,9 @@ func (cfg *PieceFinderConfig) toClassifyConfig() classifyConfig {
 	}
 	if cfg.MinTopFootprintMM > 0 {
 		cc.MinTopFootprintMM = cfg.MinTopFootprintMM
+	}
+	if cfg.BrightnessThreshold > 0 {
+		cc.BrightnessThreshold = cfg.BrightnessThreshold
 	}
 	return cc
 }
@@ -330,7 +343,7 @@ func (d colorDiag3D) asMap() map[string]interface{} {
 	}
 }
 
-func colorFromPC(pc pointcloud.PointCloud, minPieceSize float64) colorDiag3D {
+func colorFromPC(pc pointcloud.PointCloud, minPieceSize, brightnessThreshold float64) colorDiag3D {
 	maxZ := pc.MetaData().MaxZ
 	minZ := maxZ - minPieceSize
 	var totalR, totalG, totalB float64
@@ -353,7 +366,7 @@ func colorFromPC(pc pointcloud.PointCloud, minPieceSize float64) colorDiag3D {
 	diag.AvgG = totalG / float64(count)
 	diag.AvgB = totalB / float64(count)
 	diag.Brightness = (diag.AvgR + diag.AvgG + diag.AvgB) / 3.0
-	if diag.Brightness > 128 {
+	if diag.Brightness > brightnessThreshold {
 		diag.Color = 1
 	} else {
 		diag.Color = 2
@@ -363,7 +376,8 @@ func colorFromPC(pc pointcloud.PointCloud, minPieceSize float64) colorDiag3D {
 
 // 0 - blank, 1 - white, 2 - black
 func estimatePieceColor(pc pointcloud.PointCloud) int {
-	return colorFromPC(pc, defaultClassifyConfig().MinPieceSize).Color
+	cc := defaultClassifyConfig()
+	return colorFromPC(pc, cc.MinPieceSize, cc.BrightnessThreshold).Color
 }
 
 type pointSample struct {
@@ -417,12 +431,12 @@ type pcDiag3DExtra struct {
 
 // color returns the 3D verdict (0/1/2) using the same count/brightness
 // thresholds as colorFromPC, but derived from the precomputed top-band stats.
-func (d pcDiag3DExtra) color() int {
+func (d pcDiag3DExtra) color(brightnessThreshold float64) int {
 	if d.TopColoredCount <= 10 {
 		return 0
 	}
 	brightness := (d.TopMeanAttachedR + d.TopMeanAttachedG + d.TopMeanAttachedB) / 3.0
-	if brightness > 128 {
+	if brightness > brightnessThreshold {
 		return 1
 	}
 	return 2
@@ -447,7 +461,7 @@ func (d pcDiag3DExtra) rejectReason(colorDivGuard, minFootprintMM float64) strin
 // too small) it falls back to the 2D Otsu path.
 func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties, cc classifyConfig) int {
 	d3x := pcDiagnose3D(pc, img, props, 0, cc.MinPieceSize)
-	c := d3x.color()
+	c := d3x.color(cc.BrightnessThreshold)
 	if c == 0 || d3x.rejectReason(cc.ColorDivergenceGuard, cc.MinTopFootprintMM) != "" {
 		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
 	}
@@ -831,7 +845,7 @@ func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int,
 		if filter != "" && b.name != filter {
 			continue
 		}
-		d3 := colorFromPC(b.pc, cc.MinPieceSize)
+		d3 := colorFromPC(b.pc, cc.MinPieceSize, cc.BrightnessThreshold)
 		d2 := colorFromImage2D(img, b.bounds, cc.OtsuSeparationThreshold)
 		d3x := pcDiagnose3D(b.pc, img, bc.props, samples, cc.MinPieceSize)
 
