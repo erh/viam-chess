@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Garry — Chess Robot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;600&display=swap" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app kiosk">
+      <!-- Top bar -->
+      <header class="top-bar">
+        <div class="brand-group">
+          <span class="brand-mark">♞</span>
+          <span class="brand-name">Garry</span>
+          <span class="sep-char">/</span>
+          <a class="mono subtle-2 machine-name" id="machine-name" target="_blank" rel="noopener">—</a>
+        </div>
+
+        <div class="vrule"></div>
+
+        <!-- Inline controls: Robot Go -->
+        <div class="inline-ctl">
+          <div class="inline-ctl-row">
+            <span class="eyebrow-xxs">Robot</span>
+            <input id="go-n" class="input mono inline-input" value="1" maxlength="2" />
+            <button id="btn-go" class="btn btn-accent">▶ Go</button>
+            <button id="btn-undo" class="btn" title="Undo last ply">↺ Undo</button>
+          </div>
+          <div id="go-error" class="inline-error hidden">
+            <span class="inline-error-tag">err</span>
+            <span class="inline-error-msg"></span>
+            <button class="inline-error-dismiss" title="dismiss">×</button>
+          </div>
+        </div>
+
+        <div class="vrule short"></div>
+
+        <!-- Inline controls: Direct Move -->
+        <div class="inline-ctl">
+          <div class="inline-ctl-row">
+            <span class="eyebrow-xxs">Direct</span>
+            <input id="move-from" class="input mono inline-input sq" placeholder="e2" maxlength="2" />
+            <span class="arrow subtle-2">→</span>
+            <input id="move-to" class="input mono inline-input sq" placeholder="e4" maxlength="2" />
+            <button id="btn-move" class="btn">Move</button>
+          </div>
+          <div id="move-error" class="inline-error hidden">
+            <span class="inline-error-tag">err</span>
+            <span class="inline-error-msg"></span>
+            <button class="inline-error-dismiss" title="dismiss">×</button>
+          </div>
+        </div>
+
+        <div class="vrule short"></div>
+
+        <label class="auto-toggle">
+          <input type="checkbox" id="auto-mode" />
+          <span class="eyebrow-xxs">Auto</span>
+        </label>
+
+        <div class="flex-spacer"></div>
+
+        <!-- Last move readout -->
+        <div id="last-move" class="last-move hidden">
+          <span class="eyebrow-xxs">last</span>
+          <span class="last-from mono"></span>
+          <span class="last-arrow">→</span>
+          <span class="last-to mono"></span>
+        </div>
+        <div id="last-move-rule" class="vrule short hidden"></div>
+
+        <!-- Status cluster -->
+        <div class="status-cluster">
+          <span id="turn-indicator" class="mono subtle-1"></span>
+          <span id="status-pill" class="status-pill">
+            <span class="dot"></span>
+            <span class="status-pill-label">Connecting</span>
+          </span>
+        </div>
+      </header>
+
+      <!-- Main stage -->
+      <div class="main-stage">
+        <!-- Left rail -->
+        <aside class="left-rail">
+          <div class="stack">
+            <span class="eyebrow">Material</span>
+            <div id="material-scale" class="material-scale">
+              <div class="scale-base"></div>
+              <div class="scale-post"></div>
+              <div class="scale-beam" id="scale-beam">
+                <div class="scale-pan left">
+                  <span class="scale-pts" id="scale-wpts">0</span>
+                  <div class="scale-pan-strip light"></div>
+                </div>
+                <div class="scale-pan right">
+                  <span class="scale-pts" id="scale-bpts">0</span>
+                  <div class="scale-pan-strip dark"></div>
+                </div>
+              </div>
+            </div>
+            <div id="balance-label" class="balance-label">even</div>
+          </div>
+
+          <div class="hrule"></div>
+
+          <div class="stack">
+            <span class="eyebrow">White lost</span>
+            <div id="white-lost" class="captured-column white-lost"></div>
+          </div>
+          <div class="stack">
+            <span class="eyebrow">Black lost</span>
+            <div id="black-lost" class="captured-column black-lost"></div>
+          </div>
+        </aside>
+
+        <!-- Center -->
+        <main class="center-stage">
+          <div class="board-wrap">
+            <div id="board" class="chess-board"></div>
+            <div id="board-loading" class="board-loading">
+              <div class="board-spinner"></div>
+            </div>
+          </div>
+          <div class="board-hint">drag pieces · or click source then destination</div>
+        </main>
+
+        <!-- Right rail -->
+        <aside class="right-rail">
+          <div class="tape-header">
+            <span class="eyebrow">Tape</span>
+            <button id="tape-logs-toggle" class="tape-logs-toggle active" type="button" title="Toggle log events">logs</button>
+            <span id="tape-ply" class="mono subtle-2 xs">0 ply</span>
+          </div>
+          <div id="tape" class="tape"></div>
+
+          <div id="cam-panel" class="cam-panel collapsed">
+            <button id="cam-toggle" class="cam-toggle" type="button" aria-expanded="false" aria-controls="cam-body">
+              <span class="cam-toggle-chevron" aria-hidden="true">▸</span>
+              <span class="eyebrow">Live camera</span>
+              <span id="cam-status" class="mono subtle-2 xs"></span>
+            </button>
+            <div id="cam-body" class="cam-body">
+              <video id="cam-video" autoplay playsinline muted></video>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- Bottom maintenance bar -->
+      <footer class="bottom-bar">
+        <span class="eyebrow">Maintenance</span>
+        <div class="maint-row">
+          <button id="btn-refresh" class="btn btn-sm btn-ghost">Refresh</button>
+          <button id="btn-snapshot" class="btn btn-sm btn-ghost">Snapshot</button>
+          <button id="btn-cache" class="btn btn-sm btn-ghost">Clear cache</button>
+          <button id="btn-wipe" class="btn btn-sm btn-ghost danger">Wipe state</button>
+          <button id="btn-reset" class="btn btn-sm btn-ghost danger">Reset board</button>
+        </div>
+      </footer>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

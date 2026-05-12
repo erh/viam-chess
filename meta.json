@@ -19,7 +19,20 @@
     }
 
   ],
-  "applications": null,
+  "applications": [
+    {
+      "name": "chess-control",
+      "type": "single_machine",
+      "entrypoint": "dist/index.html",
+      "logoPath": "static/logo.png",
+      "customizations": {
+        "machinePicker": {
+          "heading": "Chess Robot Control",
+          "subheading": "Select your chess robot to start playing"
+        }
+      }
+    }
+  ],
   "markdown_link": "README.md",
   "entrypoint": "bin/viam-chess",
   "first_run": "",

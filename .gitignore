@@ -41,3 +41,11 @@ hack-test.jpg
 data/*output.jpg
 data/*transformed.jpg
 data/board13_e2.pcd
+
+# viamapp build artefacts
+.module-stage/
+node_modules/
+viamapp/dist/
+viamapp/.vite/
+viamapp/src/*.js
+viamapp/vite.config.js
