@@ -72,7 +72,7 @@ func realMain() error {
 	}
 
 	if *cmd == "piece-finder" {
-		pf, err := viamchess.NewPieceFinder(ctx, deps, generic.Named("foo"), &viamchess.PieceFinderConfig{"cam"}, logger)
+		pf, err := viamchess.NewPieceFinder(ctx, deps, generic.Named("foo"), &viamchess.PieceFinderConfig{Input: "cam"}, logger)
 		if err != nil {
 			return err
 		}
