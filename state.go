@@ -17,8 +17,9 @@ type state struct {
 }
 
 type savedState struct {
-	FEN       string `json:"fen"`
-	Graveyard []int  `json:"graveyard"`
+	FEN       string   `json:"fen,omitempty"`
+	Moves     []string `json:"moves,omitempty"`
+	Graveyard []int    `json:"graveyard"`
 }
 
 func (s *viamChessChess) getGame(ctx context.Context) (*state, error) {
@@ -43,6 +44,17 @@ func readState(ctx context.Context, fn string) (*state, error) {
 		return nil, fmt.Errorf("cannot unmarshal json: %w", err)
 	}
 
+	if len(ss.Moves) > 0 {
+		game := chess.NewGame()
+		for i, moveStr := range ss.Moves {
+			if err := game.PushNotationMove(moveStr, chess.UCINotation{}, nil); err != nil {
+				return nil, fmt.Errorf("cannot replay move %d (%s): %w", i, moveStr, err)
+			}
+		}
+		return &state{game, ss.Graveyard}, nil
+	}
+
+	// Legacy: FEN-only state (no move history → no undo).
 	f, err := chess.FEN(ss.FEN)
 	if err != nil {
 		return nil, fmt.Errorf("invalid fen from (%s) (%s) %w", fn, data, err)
@@ -54,8 +66,15 @@ func (s *viamChessChess) saveGame(ctx context.Context, theState *state) error {
 	ctx, span := trace.StartSpan(ctx, "saveGame")
 	defer span.End()
 
+	gameMoves := theState.game.Moves()
+	moveStrs := make([]string, len(gameMoves))
+	for i, m := range gameMoves {
+		moveStrs[i] = m.String()
+	}
+
 	ss := savedState{
 		FEN:       theState.game.FEN(),
+		Moves:     moveStrs,
 		Graveyard: theState.graveyard,
 	}
 	b, err := json.MarshalIndent(&ss, "", "  ")
