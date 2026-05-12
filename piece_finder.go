@@ -8,6 +8,7 @@ import (
 	"image/draw"
 	"math"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/golang/geo/r3"
@@ -322,6 +323,7 @@ func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.P
 type colorDiag3D struct {
 	NearTopCount int
 	MaxZ         float64
+	BoardPlaneZ  float64
 	MinZCutoff   float64
 	AvgR         float64
 	AvgG         float64
@@ -334,6 +336,7 @@ func (d colorDiag3D) asMap() map[string]interface{} {
 	return map[string]interface{}{
 		"near_top_count": d.NearTopCount,
 		"max_z":          d.MaxZ,
+		"board_plane_z":  d.BoardPlaneZ,
 		"min_z_cutoff":   d.MinZCutoff,
 		"avg_r":          d.AvgR,
 		"avg_g":          d.AvgG,
@@ -343,9 +346,32 @@ func (d colorDiag3D) asMap() map[string]interface{} {
 	}
 }
 
+// boardPlaneZ estimates the board's surface z from the median of the point
+// cloud's z values. pc.MetaData().MaxZ is unreliable when stray wall/floor
+// points behind the board leak into the per-square pc (camera angle, gaps
+// at the board edge) — those outliers push MaxZ deeper than the actual
+// board surface and corrupt the "top band" threshold used by colorFromPC.
+// The board is the dominant cluster in every realistic per-square pc (it
+// always covers most of a square, even with a piece sitting on it), so
+// the median lands on it. Returns the actual MaxZ as a fallback when the
+// pc has no points.
+func boardPlaneZ(pc pointcloud.PointCloud) float64 {
+	var zs []float64
+	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		zs = append(zs, p.Z)
+		return true
+	})
+	if len(zs) == 0 {
+		return pc.MetaData().MaxZ
+	}
+	sort.Float64s(zs)
+	return zs[len(zs)/2]
+}
+
 func colorFromPC(pc pointcloud.PointCloud, minPieceSize, brightnessThreshold float64) colorDiag3D {
 	maxZ := pc.MetaData().MaxZ
-	minZ := maxZ - minPieceSize
+	boardZ := boardPlaneZ(pc)
+	minZ := boardZ - minPieceSize
 	var totalR, totalG, totalB float64
 	count := 0
 	pc.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
@@ -358,7 +384,7 @@ func colorFromPC(pc pointcloud.PointCloud, minPieceSize, brightnessThreshold flo
 		}
 		return true
 	})
-	diag := colorDiag3D{NearTopCount: count, MaxZ: maxZ, MinZCutoff: minZ}
+	diag := colorDiag3D{NearTopCount: count, MaxZ: maxZ, BoardPlaneZ: boardZ, MinZCutoff: minZ}
 	if count <= 10 {
 		return diag
 	}
@@ -412,6 +438,7 @@ type pcDiag3DExtra struct {
 	MinX, MaxX       float64
 	MinY, MaxY       float64
 	MinZ, MaxZ       float64
+	BoardPlaneZ      float64
 	TopCount         int
 	TopColoredCount  int
 	TopMinX, TopMaxX float64
@@ -462,6 +489,10 @@ func (d pcDiag3DExtra) rejectReason(colorDivGuard, minFootprintMM float64) strin
 func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties, cc classifyConfig) int {
 	d3x := pcDiagnose3D(pc, img, props, 0, cc.MinPieceSize)
 	c := d3x.color(cc.BrightnessThreshold)
+
+	if c == 0 && d3x.TopCount == 0 && d3x.TotalCount > 100 {
+		return 0
+	}
 	if c == 0 || d3x.rejectReason(cc.ColorDivergenceGuard, cc.MinTopFootprintMM) != "" {
 		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
 	}
@@ -481,6 +512,7 @@ func (d pcDiag3DExtra) asMap() map[string]interface{} {
 		"max_y":                d.MaxY,
 		"min_z":                d.MinZ,
 		"max_z":                d.MaxZ,
+		"board_plane_z":        d.BoardPlaneZ,
 		"top_count":            d.TopCount,
 		"top_colored_count":    d.TopColoredCount,
 		"top_min_x":            d.TopMinX,
@@ -512,7 +544,13 @@ func pcDiagnose3D(pc pointcloud.PointCloud, img image.Image, props camera.Proper
 	out.TopMinY, out.TopMaxY = math.Inf(1), math.Inf(-1)
 	out.TopMinZ, out.TopMaxZ = math.Inf(1), math.Inf(-1)
 
-	minZCutoff := pc.MetaData().MaxZ - minPieceSize
+	// pc.MetaData().MaxZ can be polluted by stray wall/floor points behind the
+	// board, which would corrupt the "top band" threshold. Use the median of
+	// the per-square z values as the board-plane estimate instead — the board
+	// is always the dominant cluster in a per-square pc.
+	boardZ := boardPlaneZ(pc)
+	out.BoardPlaneZ = boardZ
+	minZCutoff := boardZ - minPieceSize
 	imgBounds := img.Bounds()
 
 	var sumAR, sumAG, sumAB, sumIR, sumIG, sumIB, sumDiv float64
@@ -721,6 +759,18 @@ func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh float
 	// Low separation means a uniform square; lighting-robust because both
 	// class means shift together under illumination changes.
 	if diag.Separation < otsuSepThresh {
+		return diag
+	}
+	// Empty-square guard: Otsu will happily find some bimodal split even on
+	// an empty square (shadow at the rect edge, a few stray noisy pixels),
+	// and the separation can edge over the threshold. A real piece occupies
+	// 20-50% of the inset rect, so a sub-5% minority class is noise, not a
+	// piece. (g4 in the failure case: 57/4968 = 1.15% dark.)
+	minorityCnt := cntDark
+	if cntLight < minorityCnt {
+		minorityCnt = cntLight
+	}
+	if float64(minorityCnt)/float64(diag.Total) < 0.05 {
 		return diag
 	}
 	// Piece color is whichever class is more extreme (closer to pure black/white).
