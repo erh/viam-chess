@@ -36,12 +36,14 @@ func realMain() error {
 
 	host := flag.String("host", "", "host")
 	debug := flag.Bool("debug", false, "")
-	cmd := flag.String("cmd", "", "command to execute (move, go, reset, wipe, skill, etc..)")
+	cmd := flag.String("cmd", "", "command to execute (move, go, reset, wipe, skill, play-fen, etc..)")
 
 	from := flag.String("from", "", "")
 	to := flag.String("to", "", "")
 	n := flag.Int("n", 1, "")
-
+	fenFile := flag.String("fen-file", "", "path to PGN file for play-fen command")
+	skill := flag.Float64("skill", 0, "engine skill level (0-100) for skill command")
+	on := flag.Bool("on", false, "auto on/off for `auto` command")
 	flag.Parse()
 
 	if *debug {
@@ -112,6 +114,7 @@ func realMain() error {
 		PoseStart:   "hack-pose-look-straight-down",
 		Camera:      "cam",
 		CaptureDir:  "captured-data",
+		VideoSaver:  "video-1",
 	}
 	_, _, err = cfg.Validate("")
 	if err != nil {
@@ -162,12 +165,84 @@ func realMain() error {
 		}
 		logger.Infof("res: %v", res)
 		return nil
+	case "undo":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"undo": *n,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+	case "wipe":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"wipe": true,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "clear-cache":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"clear-cache": true,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "skill":
+		if *skill <= 0 {
+			return fmt.Errorf("skill requires -skill <0-100>")
+		}
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"Skill": *skill,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "board-snapshot":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"board-snapshot": true,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "auto":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"auto": *on,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "play-fen":
+		if *fenFile == "" {
+			return fmt.Errorf("play-fen requires --fen-file")
+		}
+		res, err := thing.DoCommand(ctx, map[string]interface{}{
+			"play-fen": *fenFile,
+		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
 
 	default:
 		return fmt.Errorf("unknown command [%s]", *cmd)
 	}
-
-	return nil
 }
 
 // captureBoard fetches a single image from the configured camera, saves it as the

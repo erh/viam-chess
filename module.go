@@ -7,11 +7,15 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/multierr"
 
+	"github.com/golang/geo/r3"
+
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/camera"
+	componentgeneric "go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/gripper"
 	toggleswitch "go.viam.com/rdk/components/switch"
 	"go.viam.com/rdk/logging"
@@ -39,16 +43,20 @@ func init() {
 
 type viamChessChess struct {
 	resource.AlwaysRebuild
+	resource.Named
 
 	name resource.Name
 
 	logger logging.Logger
 	conf   *ChessConfig
 
+	cancelFunc func()
+
 	pieceFinder vision.Service
 	arm         arm.Arm
 	gripper     gripper.Gripper
 	cam         camera.Camera
+	videoSaver  resource.Resource
 
 	poseStart toggleswitch.Switch
 
@@ -65,6 +73,33 @@ type viamChessChess struct {
 	doCommandLock   sync.Mutex
 	doCommandCount  atomic.Int32
 	movePieceStatus atomic.Int32
+
+	squareXY   map[string]r3.Vector
+	squareXYMu sync.RWMutex
+
+	// autoEnabled gates the engine reply in the board loop; detection + cache
+	// refresh always run.
+	autoEnabled atomic.Bool
+
+	// announceEnabled gates the on_move_target dispatch. Default true.
+	announceEnabled atomic.Bool
+
+	// onMoveTarget receives a "move_made" domain event after every successful
+	// engine move (whether triggered by cmd.Go or auto-mode). nil = disabled.
+	onMoveTarget resource.Resource
+
+	// boardCache holds the last camera-derived snapshot, populated by the
+	// board loop and read by board-snapshot. Guarded by mu.
+	boardCache struct {
+		mu             sync.RWMutex
+		ready          bool
+		fen            string
+		cameraBoard    map[string]interface{}
+		whiteGraveyard []interface{}
+		blackGraveyard []interface{}
+		capturedAt     time.Time
+		gameEvents     GameEventsResult
+	}
 }
 
 func newViamChessChess(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (resource.Resource, error) {
@@ -81,11 +116,15 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	var err error
 
+	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+
 	s := &viamChessChess{
 		name:        name,
 		logger:      logger,
 		conf:        conf,
-		skillAdjust: 50,
+		cancelFunc:  cancelFunc,
+		skillAdjust: conf.initialSkillAdjust(),
+		squareXY:    make(map[string]r3.Vector),
 	}
 
 	s.pieceFinder, err = vision.FromProvider(deps, conf.PieceFinder)
@@ -110,12 +149,32 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 
+	if conf.VideoSaver != "" {
+		s.videoSaver, err = componentgeneric.FromProvider(deps, conf.VideoSaver)
+		if err != nil {
+			logger.Warnf("video-saver %q not found, video recording disabled: %v", conf.VideoSaver, err)
+			s.videoSaver = nil
+		}
+	}
+
+	if conf.OnMoveTarget != "" {
+		s.onMoveTarget, err = generic.FromProvider(deps, conf.OnMoveTarget)
+		if err != nil {
+			// Optional dep — log and continue. AlwaysRebuild will re-run this
+			// constructor once the target becomes available, so announcements
+			// turn on automatically without manual intervention.
+			logger.Warnf("on_move_target %q not yet available, announcements disabled until rebuild: %v", conf.OnMoveTarget, err)
+			s.onMoveTarget = nil
+		}
+	}
+	s.announceEnabled.Store(true)
+
 	s.poseStart, err = toggleswitch.FromProvider(deps, conf.PoseStart)
 	if err != nil {
 		return nil, err
 	}
 
-	s.motion, err = motion.FromDependencies(deps, "builtin")
+	s.motion, err = motion.FromProvider(deps, "builtin")
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +196,9 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, err
 	}
 
+	go s.runBoardLoop(cancelCtx)
+
+
 	err = s.engine.Run(uci.CmdUCI, uci.CmdIsReady, uci.CmdUCINewGame) // TODO: not sure this is correct
 	if err != nil {
 		return nil, err
@@ -151,6 +213,8 @@ func (s *viamChessChess) Name() resource.Name {
 
 func (s *viamChessChess) Close(ctx context.Context) error {
 	var err error
+
+	s.cancelFunc()
 
 	if s.engine != nil {
 		err = multierr.Combine(err, s.engine.Close())

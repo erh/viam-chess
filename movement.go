@@ -8,16 +8,31 @@ import (
 
 	"github.com/golang/geo/r3"
 
+	"github.com/corentings/chess/v2"
+
+	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/vision/viscapture"
 	"go.viam.com/utils/trace"
-
-	"github.com/corentings/chess/v2"
 )
 
-func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCapture, theState *state, from, to string, m *chess.Move) error {
+func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCapture, theState *state, from, to string, m *chess.Move, board *chess.Board) error {
+	return s.movePieceWithPickupZ(ctx, data, theState, from, to, m, board, 0)
+}
+
+func (s *viamChessChess) pickupZForPieceType(pt chess.PieceType) float64 {
+	if pt == chess.King || pt == chess.Queen {
+		return s.conf.grabZTall()
+	}
+	return s.conf.grabZ()
+}
+
+// pickupZOverride <= 0 means auto-detect from theState/board (matches movePiece).
+// Pass a positive value when the source isn't expressible as a chess.Board square
+// (e.g., a graveyard slot during undo).
+func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscapture.VisCapture, theState *state, from, to string, m *chess.Move, board *chess.Board, pickupZOverride float64) error {
 	s.movePieceStatus.Add(1)
 	defer s.movePieceStatus.Add(-1)
 
@@ -25,120 +40,168 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 	defer span.End()
 
 	s.logger.Infof("movePiece called: %s -> %s", from, to)
-	if to != "-" && to[0] != 'X' { // check where we're going
-		o := s.findObject(data, to)
-		if o == nil {
-			return fmt.Errorf("can't find object for: %s", to)
+	if to != "-" && to[0] != 'X' {
+		occupied := false
+		var capturedPiece chess.Piece
+		if theState != nil {
+			sq := chess.NewSquare(chess.File(to[0]-'a'), chess.Rank(to[1]-'1'))
+			capturedPiece = theState.game.Position().Board().Piece(sq)
+			occupied = capturedPiece != chess.NoPiece
+		} else if len(data.Objects) > 0 {
+			o := s.findObject(data, to)
+			if o == nil {
+				return fmt.Errorf("can't find object for: %s", to)
+			}
+			occupied = !strings.HasSuffix(o.Geometry.Label(), "-0")
 		}
 
-		if !strings.HasSuffix(o.Geometry.Label(), "-0") {
-
-			what := "?"
-
-			s.logger.Infof("position %s already has a piece (%s) (%s), will move", to, what, o.Geometry.Label())
-			err := s.movePiece(ctx, data, theState, to, "-", nil)
+		if occupied {
+			s.logger.Infof("position %s already has a piece, will move to graveyard", to)
+			err := s.movePiece(ctx, data, theState, to, "-", nil, nil)
 			if err != nil {
 				return fmt.Errorf("can't move piece out of the way: %w", err)
 			}
-
 			if theState != nil {
-				pc := theState.game.Position().Board().Piece(m.S2())
-				if pc.Color() == chess.White {
-					theState.whiteGraveyard = append(theState.whiteGraveyard, int(pc))
+				if capturedPiece.Color() == chess.White {
+					theState.whiteGraveyard = append(theState.whiteGraveyard, int(capturedPiece))
 				} else {
-					theState.blackGraveyard = append(theState.blackGraveyard, int(pc))
+					theState.blackGraveyard = append(theState.blackGraveyard, int(capturedPiece))
 				}
 			}
-
 		}
 	}
 
-	useZ := 100.0
+	grabZ := s.conf.grabZ()
+	grabZTall := s.conf.grabZTall()
 
-	const magicMin = 12.0
+	pickupZ := grabZ
+	if pickupZOverride > 0 {
+		pickupZ = pickupZOverride
+	} else {
+		var pieceBoard *chess.Board
+		if theState != nil {
+			pieceBoard = theState.game.Position().Board()
+		} else if board != nil {
+			pieceBoard = board
+		}
+		if pieceBoard != nil && len(from) == 2 {
+			sq := chess.NewSquare(chess.File(from[0]-'a'), chess.Rank(from[1]-'1'))
+			pt := pieceBoard.Piece(sq).Type()
+			if pt == chess.King || pt == chess.Queen {
+				pickupZ = grabZTall
+			}
+		}
+		// extraQueenGraveyardSlot always holds a queen (see promotion.go).
+		if from == fmt.Sprintf("XW%d", extraQueenGraveyardSlot) || from == fmt.Sprintf("XB%d", extraQueenGraveyardSlot) {
+			pickupZ = grabZTall
+		}
+	}
+
 	{
-		center, err := s.getCenterFor(data, from, theState)
+		xy, err := s.getSquareXY(from, data)
 		if err != nil {
 			return err
 		}
-		useZ = max(magicMin, center.Z) // HACK 5 should not be there
 
 		err = s.setupGripper(ctx)
 		if err != nil {
 			return err
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
+		err = s.moveGripper(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ})
 		if err != nil {
 			return err
 		}
 
-		for {
-			err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, useZ})
-			if err != nil {
-				return err
-			}
+		grabPos := r3.Vector{X: xy.X, Y: xy.Y, Z: pickupZ}
 
-			got, err := s.myGrab(ctx)
-			if err != nil {
-				return err
+		tryGrab := func(pos r3.Vector) (bool, error) {
+			if err := s.setupGripper(ctx); err != nil {
+				return false, err
 			}
-			if got {
-				break
+			time.Sleep(500 * time.Millisecond)
+			if err := s.moveGripper(ctx, pos); err != nil {
+				return false, err
 			}
-
-			useZ -= 10
-			if useZ < magicMin { // todo: magic number
-				return fmt.Errorf("couldn't grab, and scared to go lower")
-			}
-
-			s.logger.Warnf("didn't grab, going to try a little more")
-
-			err = s.setupGripper(ctx)
-			if err != nil {
-				return err
-			}
-			time.Sleep(250 * time.Millisecond)
+			return s.myGrab(ctx)
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
+		got, err := tryGrab(grabPos)
+		if err != nil {
+			return err
+		}
+		if !got {
+			s.logger.Warnf("grab failed at %s, retrying +20mm X", from)
+			got, err = tryGrab(r3.Vector{X: grabPos.X + 20, Y: grabPos.Y, Z: grabPos.Z})
+			if err != nil {
+				return err
+			}
+		}
+		if !got {
+			return fmt.Errorf("couldn't grab piece at %s after 2 attempts", from)
+		}
+
+		err = s.moveGripper(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ})
 		if err != nil {
 			return err
 		}
 	}
 
 	{
-		var center r3.Vector
-		var err error
+		var destXY r3.Vector
 		if to == "-" {
-			// Pick the right graveyard from the piece's color. Without theState
-			// we fall back to the generic getCenterFor "-" position.
-			isWhite := false
-			colorIdx := 0
+			// Slot 0 is reserved for the promotion spare queen; captures use 1+.
+			// Without theState we can read color from the camera label
+			// ("<sq>-1" = white, "<sq>-2" = black) but not the slot count, so we
+			// default to slot 1 — cmd.Go is the bookkeeper for accumulation.
+			colorIdx, isWhite := 1, false
 			if theState != nil && len(from) == 2 {
 				sq := chess.NewSquare(chess.File(from[0]-'a'), chess.Rank(from[1]-'1'))
 				piece := theState.game.Position().Board().Piece(sq)
 				isWhite = piece.Color() == chess.White
 				if isWhite {
-					colorIdx = len(theState.whiteGraveyard)
+					colorIdx = len(theState.whiteGraveyard) + 1
 				} else {
-					colorIdx = len(theState.blackGraveyard)
+					colorIdx = len(theState.blackGraveyard) + 1
+				}
+			} else if len(from) == 2 && len(data.Objects) > 0 {
+				if o := s.findObject(data, from); o != nil {
+					label := o.Geometry.Label()
+					if !strings.HasSuffix(label, "-0") && len(label) > 0 {
+						switch label[len(label)-1] {
+						case '1':
+							isWhite = true
+						case '2':
+							isWhite = false
+						}
+					}
 				}
 			}
-			center, err = s.graveyardPosition(data, colorIdx, isWhite)
+			center, err := s.graveyardPosition(data, colorIdx, isWhite)
+			if err != nil {
+				return err
+			}
+			destXY = r3.Vector{X: center.X, Y: center.Y}
+		} else if len(to) > 0 && to[0] == 'X' {
+			center, err := s.getCenterFor(data, to, theState)
+			if err != nil {
+				return err
+			}
+			destXY = r3.Vector{X: center.X, Y: center.Y}
 		} else {
-			center, err = s.getCenterFor(data, to, theState)
+			var err error
+			destXY, err = s.getSquareXY(to, data)
+			if err != nil {
+				return err
+			}
 		}
+
+		err := s.moveGripper(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: safeZ})
 		if err != nil {
 			return err
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
-		if err != nil {
-			return err
-		}
-
-		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, useZ})
+		err = s.moveGripper(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: pickupZ})
 		if err != nil {
 			return err
 		}
@@ -148,7 +211,7 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 			return err
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{center.X, center.Y, safeZ})
+		err = s.moveGripper(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: safeZ})
 		if err != nil {
 			return err
 		}
@@ -184,7 +247,7 @@ func (s *viamChessChess) setupGripper(ctx context.Context) error {
 	ctx, span := trace.StartSpan(ctx, "setupGripper")
 	defer span.End()
 
-	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": 450.0})
+	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": s.conf.gripperOpenPos()})
 	return err
 }
 
@@ -194,7 +257,7 @@ func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
 
 	orientation := &spatialmath.OrientationVectorDegrees{
 		OZ:    -1,
-		Theta: s.startPose.Pose().Orientation().OrientationVectorDegrees().Theta,
+		Theta: s.startPose.Pose().Orientation().OrientationVectorDegrees().Theta - 180,
 	}
 
 	if p.X > 300 {
@@ -207,9 +270,12 @@ func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
 	}
 
 	myPose := spatialmath.NewPose(p, orientation)
+	myConstraints := &motionplan.Constraints{}
+	myConstraints.AddOrientationConstraint(motionplan.OrientationConstraint{OrientationToleranceDegs: 45})
 	_, err := s.motion.Move(ctx, motion.MoveReq{
 		ComponentName: s.conf.Gripper,
 		Destination:   referenceframe.NewPoseInFrame("world", myPose),
+		Constraints:   myConstraints,
 	})
 	if err != nil {
 		return fmt.Errorf("can't move to %v: %w", myPose, err)

@@ -40,23 +40,34 @@ func (s *viamChessChess) graveyardPosition(data viscapture.VisCapture, colorIdx 
 		k = fmt.Sprintf("h%d", 1+(colorIdx%8))
 	}
 
-	oo := s.findObject(data, k)
-	if oo == nil {
-		return r3.Vector{}, fmt.Errorf("why no object for %s", k)
+	s.squareXYMu.RLock()
+	cached, ok := s.squareXY[k]
+	s.squareXYMu.RUnlock()
+
+	var baseX, baseY float64
+	if ok {
+		baseX, baseY = cached.X, cached.Y
+	} else {
+		oo := s.findObject(data, k)
+		if oo == nil {
+			return r3.Vector{}, fmt.Errorf("why no object for %s", k)
+		}
+		md := oo.MetaData()
+		baseX, baseY = md.Center().X, md.Center().Y
 	}
 
-	md := oo.MetaData()
+	spacingY := s.conf.graveyardSpacingY()
+	graveyardZ := s.conf.graveyardZ()
 	if isWhite {
-		return r3.Vector{md.Center().X, md.Center().Y - float64(ex*80), 60}, nil
+		return r3.Vector{X: baseX, Y: baseY - float64(ex)*spacingY, Z: graveyardZ}, nil
 	}
-	return r3.Vector{md.Center().X, md.Center().Y + float64(ex*80), 60}, nil
+	return r3.Vector{X: baseX, Y: baseY + float64(ex)*spacingY, Z: graveyardZ}, nil
 }
 
 func (s *viamChessChess) getCenterFor(data viscapture.VisCapture, pos string, theState *state) (r3.Vector, error) {
 	if pos == "-" {
-		// Fallback for hover/other callers; movePiece handles graveyard
-		// placement directly with the captured piece's color.
-		return r3.Vector{400, -400, 200}, nil
+		// Fallback for hover/other callers; movePiece handles graveyard placement directly.
+		return r3.Vector{X: 400, Y: -400, Z: 200}, nil
 	}
 
 	if pos[0] == 'X' {
@@ -81,4 +92,68 @@ func (s *viamChessChess) getCenterFor(data viscapture.VisCapture, pos string, th
 	}
 
 	return GetPickupCenter(o), nil
+}
+
+func (s *viamChessChess) allSquaresCached() bool {
+	s.squareXYMu.RLock()
+	defer s.squareXYMu.RUnlock()
+	return len(s.squareXY) >= 64
+}
+
+// Forces re-computation from the next pointcloud capture (e.g. after the board has moved).
+func (s *viamChessChess) clearSquareCache() {
+	s.squareXYMu.Lock()
+	s.squareXY = make(map[string]r3.Vector)
+	s.squareXYMu.Unlock()
+	s.logger.Infof("square position cache cleared")
+}
+
+func (s *viamChessChess) populateCacheFromCapture(data viscapture.VisCapture) {
+	for rank := 1; rank <= 8; rank++ {
+		for file := 'a'; file <= 'h'; file++ {
+			name := fmt.Sprintf("%s%d", string([]byte{byte(file)}), rank)
+			s.squareXYMu.RLock()
+			_, ok := s.squareXY[name]
+			s.squareXYMu.RUnlock()
+			if ok {
+				continue
+			}
+			center, err := s.getCenterFor(data, name, nil)
+			if err != nil {
+				s.logger.Warnf("populateCacheFromCapture: can't get center for %s: %v", name, err)
+				continue
+			}
+			s.squareXYMu.Lock()
+			s.squareXY[name] = r3.Vector{X: center.X, Y: center.Y}
+			s.squareXYMu.Unlock()
+		}
+	}
+	s.squareXYMu.RLock()
+	count := len(s.squareXY)
+	s.squareXYMu.RUnlock()
+	s.logger.Infof("square cache populated: %d/64 squares cached", count)
+}
+
+func (s *viamChessChess) getSquareXY(squareName string, data viscapture.VisCapture) (r3.Vector, error) {
+	s.squareXYMu.RLock()
+	xy, ok := s.squareXY[squareName]
+	s.squareXYMu.RUnlock()
+	if ok {
+		s.logger.Debugf("getSquareXY cache hit for %s: %v", squareName, xy)
+		return xy, nil
+	}
+
+	center, err := s.getCenterFor(data, squareName, nil)
+	if err != nil {
+		return r3.Vector{}, err
+	}
+	xy = r3.Vector{X: center.X, Y: center.Y}
+
+	s.squareXYMu.Lock()
+	s.squareXY[squareName] = xy
+	count := len(s.squareXY)
+	s.squareXYMu.Unlock()
+
+	s.logger.Infof("getSquareXY cache miss for %s, computed: %v (%d/64 squares cached)", squareName, xy, count)
+	return xy, nil
 }
