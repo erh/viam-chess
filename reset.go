@@ -1,9 +1,12 @@
 package viamchess
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/corentings/chess/v2"
+
+	"go.viam.com/rdk/vision/viscapture"
 )
 
 var homeRanks = []chess.Rank{chess.Rank1, chess.Rank2, chess.Rank7, chess.Rank8}
@@ -86,4 +89,45 @@ func nextResetMove(theState *resetState) (chess.Square, chess.Square, error) {
 	}
 
 	return -1, -1, nil
+}
+
+func (s *viamChessChess) resetBoard(ctx context.Context) error {
+	theMainState, err := s.getGame(ctx)
+	if err != nil {
+		return err
+	}
+
+	theState := &resetState{theMainState.game.Position().Board(), theMainState.graveyard}
+
+	for {
+		from, to, err := nextResetMove(theState)
+		if err != nil {
+			return err
+		}
+		if from < 0 {
+			break
+		}
+
+		err = s.goToStart(ctx)
+		if err != nil {
+			return err
+		}
+
+		all, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil)
+		if err != nil {
+			return err
+		}
+
+		err = s.movePiece(ctx, all, nil, squareToString(from), squareToString(to), nil)
+		if err != nil {
+			return err
+		}
+
+		err = theState.applyMove(from, to)
+		if err != nil {
+			return err
+		}
+	}
+
+	return s.wipe(ctx)
 }
