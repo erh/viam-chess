@@ -12,27 +12,36 @@ import (
 var homeRanks = []chess.Rank{chess.Rank1, chess.Rank2, chess.Rank7, chess.Rank8}
 
 type resetState struct {
-	board     *chess.Board
-	graveyard []int
+	board          *chess.Board
+	whiteGraveyard []int // sourced from chess.Square 70–84
+	blackGraveyard []int // sourced from chess.Square 85–99
 }
 
 func (s *resetState) applyMove(from, to chess.Square) error {
 	m := s.board.SquareMap()
-	if from < 70 {
+	switch {
+	case from < 70:
 		m[to] = m[from]
 		m[from] = chess.NoPiece
-	} else {
+	case from < 85:
 		idx := int(from) - 70
-		m[to] = chess.Piece(s.graveyard[idx])
-		s.graveyard[idx] = -1
+		m[to] = chess.Piece(s.whiteGraveyard[idx])
+		s.whiteGraveyard[idx] = -1
+	default:
+		idx := int(from) - 85
+		m[to] = chess.Piece(s.blackGraveyard[idx])
+		s.blackGraveyard[idx] = -1
 	}
 	s.board = chess.NewBoard(m)
 	return nil
 }
 
 func squareToString(s chess.Square) string {
+	if s >= 85 {
+		return fmt.Sprintf("XB%d", int(s)-85)
+	}
 	if s >= 70 {
-		return fmt.Sprintf("X%d", int(s)-70)
+		return fmt.Sprintf("XW%d", int(s)-70)
 	}
 	return s.String()
 }
@@ -56,9 +65,14 @@ func findForRest(theState *resetState, correct *chess.Board, what chess.Piece) (
 		}
 	}
 
-	for idx, p := range theState.graveyard {
+	for idx, p := range theState.whiteGraveyard {
 		if what == chess.Piece(p) {
 			return chess.Square(70 + idx), nil
+		}
+	}
+	for idx, p := range theState.blackGraveyard {
+		if what == chess.Piece(p) {
+			return chess.Square(85 + idx), nil
 		}
 	}
 
@@ -97,7 +111,11 @@ func (s *viamChessChess) resetBoard(ctx context.Context) error {
 		return err
 	}
 
-	theState := &resetState{theMainState.game.Position().Board(), theMainState.graveyard}
+	theState := &resetState{
+		board:          theMainState.game.Position().Board(),
+		whiteGraveyard: theMainState.whiteGraveyard,
+		blackGraveyard: theMainState.blackGraveyard,
+	}
 
 	for {
 		from, to, err := nextResetMove(theState)

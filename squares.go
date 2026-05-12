@@ -29,37 +29,50 @@ func (s *viamChessChess) findDetection(data viscapture.VisCapture, pos string) o
 	return nil
 }
 
-func (s *viamChessChess) graveyardPosition(data viscapture.VisCapture, pos int) (r3.Vector, error) {
-	f := 8 - (pos % 8)
-	ex := 1 + (pos / 8)
+// isWhite=true → a-file side (negative Y); false → h-file side (positive Y).
+func (s *viamChessChess) graveyardPosition(data viscapture.VisCapture, colorIdx int, isWhite bool) (r3.Vector, error) {
+	ex := 1 + (colorIdx / 8)
 
-	k := fmt.Sprintf("a%d", f)
+	var k string
+	if isWhite {
+		k = fmt.Sprintf("a%d", 8-(colorIdx%8))
+	} else {
+		k = fmt.Sprintf("h%d", 1+(colorIdx%8))
+	}
+
 	oo := s.findObject(data, k)
 	if oo == nil {
 		return r3.Vector{}, fmt.Errorf("why no object for %s", k)
 	}
 
 	md := oo.MetaData()
-	return r3.Vector{md.Center().X, md.Center().Y - float64(ex*80), 60}, nil
-
+	if isWhite {
+		return r3.Vector{md.Center().X, md.Center().Y - float64(ex*80), 60}, nil
+	}
+	return r3.Vector{md.Center().X, md.Center().Y + float64(ex*80), 60}, nil
 }
 
 func (s *viamChessChess) getCenterFor(data viscapture.VisCapture, pos string, theState *state) (r3.Vector, error) {
 	if pos == "-" {
-		if s == nil {
-			return r3.Vector{400, -400, 200}, nil
-		}
-		return s.graveyardPosition(data, len(theState.graveyard))
+		// Fallback for hover/other callers; movePiece handles graveyard
+		// placement directly with the captured piece's color.
+		return r3.Vector{400, -400, 200}, nil
 	}
 
 	if pos[0] == 'X' {
-		x := -1
-		_, err := fmt.Sscanf(pos, "X%d", &x)
-		if err != nil {
-			return r3.Vector{}, fmt.Errorf("bad special graveyard (%s)", pos)
+		// "XW{n}" / "XB{n}" = white/black graveyard slot n.
+		if len(pos) >= 3 {
+			x := -1
+			if pos[1] == 'W' {
+				fmt.Sscanf(pos, "XW%d", &x)
+				return s.graveyardPosition(data, x, true)
+			}
+			if pos[1] == 'B' {
+				fmt.Sscanf(pos, "XB%d", &x)
+				return s.graveyardPosition(data, x, false)
+			}
 		}
-
-		return s.graveyardPosition(data, x)
+		return r3.Vector{}, fmt.Errorf("bad special graveyard (%s)", pos)
 	}
 
 	o := s.findObject(data, pos)

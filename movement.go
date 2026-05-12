@@ -43,7 +43,11 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 
 			if theState != nil {
 				pc := theState.game.Position().Board().Piece(m.S2())
-				theState.graveyard = append(theState.graveyard, int(pc))
+				if pc.Color() == chess.White {
+					theState.whiteGraveyard = append(theState.whiteGraveyard, int(pc))
+				} else {
+					theState.blackGraveyard = append(theState.blackGraveyard, int(pc))
+				}
 			}
 
 		}
@@ -104,7 +108,27 @@ func (s *viamChessChess) movePiece(ctx context.Context, data viscapture.VisCaptu
 	}
 
 	{
-		center, err := s.getCenterFor(data, to, theState)
+		var center r3.Vector
+		var err error
+		if to == "-" {
+			// Pick the right graveyard from the piece's color. Without theState
+			// we fall back to the generic getCenterFor "-" position.
+			isWhite := false
+			colorIdx := 0
+			if theState != nil && len(from) == 2 {
+				sq := chess.NewSquare(chess.File(from[0]-'a'), chess.Rank(from[1]-'1'))
+				piece := theState.game.Position().Board().Piece(sq)
+				isWhite = piece.Color() == chess.White
+				if isWhite {
+					colorIdx = len(theState.whiteGraveyard)
+				} else {
+					colorIdx = len(theState.blackGraveyard)
+				}
+			}
+			center, err = s.graveyardPosition(data, colorIdx, isWhite)
+		} else {
+			center, err = s.getCenterFor(data, to, theState)
+		}
 		if err != nil {
 			return err
 		}

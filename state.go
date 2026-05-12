@@ -12,14 +12,16 @@ import (
 )
 
 type state struct {
-	game      *chess.Game
-	graveyard []int
+	game           *chess.Game
+	whiteGraveyard []int // a-file side
+	blackGraveyard []int // h-file side
 }
 
 type savedState struct {
-	FEN       string   `json:"fen,omitempty"`
-	Moves     []string `json:"moves,omitempty"`
-	Graveyard []int    `json:"graveyard"`
+	FEN            string   `json:"fen,omitempty"`
+	Moves          []string `json:"moves,omitempty"`
+	WhiteGraveyard []int    `json:"white_graveyard,omitempty"`
+	BlackGraveyard []int    `json:"black_graveyard,omitempty"`
 }
 
 func (s *viamChessChess) getGame(ctx context.Context) (*state, error) {
@@ -32,7 +34,7 @@ func readState(ctx context.Context, fn string) (*state, error) {
 
 	data, err := os.ReadFile(fn)
 	if os.IsNotExist(err) {
-		return &state{chess.NewGame(), []int{}}, nil
+		return &state{game: chess.NewGame()}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error reading fen (%s): %w", fn, err)
@@ -51,7 +53,7 @@ func readState(ctx context.Context, fn string) (*state, error) {
 				return nil, fmt.Errorf("cannot replay move %d (%s): %w", i, moveStr, err)
 			}
 		}
-		return &state{game, ss.Graveyard}, nil
+		return &state{game: game, whiteGraveyard: ss.WhiteGraveyard, blackGraveyard: ss.BlackGraveyard}, nil
 	}
 
 	// Legacy: FEN-only state (no move history → no undo).
@@ -59,7 +61,7 @@ func readState(ctx context.Context, fn string) (*state, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid fen from (%s) (%s) %w", fn, data, err)
 	}
-	return &state{chess.NewGame(f), ss.Graveyard}, nil
+	return &state{game: chess.NewGame(f), whiteGraveyard: ss.WhiteGraveyard, blackGraveyard: ss.BlackGraveyard}, nil
 }
 
 func (s *viamChessChess) saveGame(ctx context.Context, theState *state) error {
@@ -73,9 +75,10 @@ func (s *viamChessChess) saveGame(ctx context.Context, theState *state) error {
 	}
 
 	ss := savedState{
-		FEN:       theState.game.FEN(),
-		Moves:     moveStrs,
-		Graveyard: theState.graveyard,
+		FEN:            theState.game.FEN(),
+		Moves:          moveStrs,
+		WhiteGraveyard: theState.whiteGraveyard,
+		BlackGraveyard: theState.blackGraveyard,
 	}
 	b, err := json.MarshalIndent(&ss, "", "  ")
 	if err != nil {
