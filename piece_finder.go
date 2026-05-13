@@ -411,41 +411,26 @@ func (d pcDiag3DExtra) rejectReason(colorDivGuard, minFootprintMM float64) strin
 	return ""
 }
 
-// classifyPieceColor returns 0/1/2 using the guarded 3D classifier. If the 3D
-// verdict is rejected (empty band, colors diverge from srcImg, or footprint is
-// too small) it falls back to the 2D Otsu path.
-//
-// W vs B is decided by the *relative* brightness of the piece-top points vs the
-// board-surface points within the same square, with the piece-top absolute
-// brightness as a tiebreaker when the diff is ambiguous. Pure absolute-brightness
-// cutoffs flip under dim lighting (cream pieces shift below the cutoff, glossy
-// black tops shift above) and a fixed cutoff has no single value that works
-// across captures. Comparing to the same square's own board-surface points is
-// lighting-invariant: both the piece and the board are illuminated together, so
-// the sign of the difference stays consistent — white pieces always sit higher
-// than blue squares, black pieces always sit lower than any square color. The
-// one stubborn case is a white piece on a white board square, where the piece
-// can look slightly darker than the surrounding paint; in that regime the
-// absolute brightness is still well above any black piece, so it wins the
-// tiebreaker.
+// classifyPieceColor returns 0 (empty), 1 (white), or 2 (black). 3D color is
+// compared relative to the square's own board-surface points so the verdict is
+// lighting-invariant; warmth (R-B) is the tiebreaker. Falls back to 2D Otsu
+// when the 3D signal is missing or its colors diverge from srcImg.
 func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Rectangle, props camera.Properties, cc classifyConfig) int {
 	d3x := pcDiagnose3D(pc, img, props, 0, cc.MinPieceSize)
 
-	// Color-divergence rejection: pc-attached colors disagree with srcImg
-	// pixels at the projected coordinates. This signals a bad alignment, so
-	// the 3D color verdict can't be trusted — defer to 2D entirely.
+	// pc-attached colors disagree with srcImg pixels → bad depth/RGB alignment.
 	if d3x.TopColoredCount > 0 && d3x.TopColorDivergence > cc.ColorDivergenceGuard {
 		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
 	}
 
-	// Some 3D piece points — trust the relative-to-board 3D verdict. Footprint
-	// rejection used to send these to 2D, but a dim capture often leaves only
-	// 10-40 top points with a sub-5mm footprint (board20 c1/d1/f8) where the
-	// 3D color is still a far better signal than 2D Otsu in dim conditions.
 	if d3x.TopColoredCount > 5 {
 		pieceBr := (d3x.TopMeanAttachedR + d3x.TopMeanAttachedG + d3x.TopMeanAttachedB) / 3.0
-		const clearWhiteDiff = 0.0
+		// Cream pieces keep R-B > 15 at any brightness; black plastic is neutral (R-B < 5).
+		// Warmth survives both dim lighting and dark-green boards where brightness alone lies.
+		pieceWarmth := d3x.TopMeanAttachedR - d3x.TopMeanAttachedB
+		const clearWhiteDiff = 25.0
 		const clearBlackDiff = -50.0
+		const warmthCutoff = 10.0
 		const absoluteWhiteCutoff = 100.0
 		if d3x.BoardColoredCount > 10 {
 			boardBr := (d3x.BoardMeanAttachedR + d3x.BoardMeanAttachedG + d3x.BoardMeanAttachedB) / 3.0
@@ -456,21 +441,20 @@ func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Re
 			if diff < clearBlackDiff {
 				return 2
 			}
-			// Ambiguous diff (piece roughly as bright as the board — typical
-			// for a white piece on a white square). Fall through to absolute.
+			if pieceWarmth > warmthCutoff {
+				return 1
+			}
+			return 2
 		}
-		if pieceBr > absoluteWhiteCutoff {
+		if pieceBr > absoluteWhiteCutoff || pieceWarmth > warmthCutoff {
 			return 1
 		}
 		return 2
 	}
 
-	// No 3D piece signal at all. With many board-surface points this is a
-	// genuine empty square; otherwise the depth sensor wholly failed in this
-	// region and Otsu 2D is the best we can do.
-	if d3x.TotalCount > 100 {
-		return 0
-	}
+	// Depth can wholly miss glossy/low-texture pieces while still capturing the
+	// surrounding board, so total_count alone can't rule out a piece. 2D Otsu
+	// returns 0 for uniform rects.
 	return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
 }
 
@@ -778,8 +762,8 @@ func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh float
 	if float64(minorityCnt)/float64(diag.Total) < 0.05 {
 		return diag
 	}
-	// Piece color is whichever class is more extreme (closer to pure black/white).
-	if diag.MeanDark < (255 - diag.MeanLight) {
+	// Minority class is the piece — board-color-invariant, unlike "more extreme class".
+	if cntDark < cntLight {
 		diag.Color = 2
 	} else {
 		diag.Color = 1
