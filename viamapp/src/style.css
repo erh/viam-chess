@@ -107,8 +107,10 @@ body {
 .btn-accent:disabled { background: var(--bg-1); color: var(--text-4); border-color: var(--line-1); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .btn-ghost:hover { background: var(--bg-2); color: var(--text-1); }
-.btn-ghost.danger { color: var(--danger); }
-.btn-ghost.danger:hover { background: var(--danger-dim); color: var(--danger); }
+.btn.danger { color: var(--danger); border-color: var(--danger); }
+.btn.danger:hover { background: var(--danger-dim); border-color: var(--danger); color: var(--danger); }
+.btn-ghost.danger { border-color: transparent; }
+.btn-ghost.danger:hover { background: var(--danger-dim); border-color: transparent; }
 .btn-sm { height: 24px; padding: 0 8px; font-size: 11px; }
 
 /* Inputs */
