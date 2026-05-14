@@ -98,6 +98,9 @@ let busy = false;
 // Auto-mode is now server-side. We mirror the toggle locally just for the
 // checkbox UI; the truth comes from board-snapshot's `auto` field.
 let autoMode = false;
+// Same pattern for skill: server-side `skillAdjust`, mirrored locally for the
+// slider. 50 is neutral; <50 weakens the engine, >50 strengthens it.
+let skill = 50;
 // Active vs idle snapshot cadence. Snapshot reads from a server-side cache
 // (no per-call camera capture), so this is purely about UI freshness.
 const ACTIVE_REFRESH_MS = 500;
@@ -632,6 +635,10 @@ function applySnapshot(res: Record<string, JsonValue>) {
     const cb = document.getElementById("auto-mode") as HTMLInputElement | null;
     if (cb) cb.checked = autoMode;
   }
+  if (typeof res.skill === "number" && res.skill !== skill) {
+    skill = res.skill;
+    syncSkillUI();
+  }
   cameraBoard =
     res.camera_board && typeof res.camera_board === "object"
       ? (res.camera_board as Record<string, string>)
@@ -806,6 +813,31 @@ async function setAutoModeOnServer(enabled: boolean): Promise<boolean> {
     }
   }
   pushEvent("go", `auto: ${enabled ? "on" : "off"}`);
+  return true;
+}
+
+// ── Skill knob ─────────────────────────────────────────────────────────────
+
+function syncSkillUI() {
+  const slider = document.getElementById("skill-knob") as HTMLInputElement | null;
+  const label = document.getElementById("skill-value");
+  if (slider) slider.value = String(Math.round(skill));
+  if (label) label.textContent = String(Math.round(skill));
+}
+
+async function setSkillOnServer(value: number): Promise<boolean> {
+  skill = value;
+  syncSkillUI();
+  if (chessService) {
+    // Pause polling so an in-flight snapshot can't revert the optimistic value.
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    try {
+      await doCommand({ skill: value });
+    } finally {
+      startAutoRefresh();
+    }
+  }
+  pushEvent("go", `skill: ${value}`);
   return true;
 }
 
@@ -1141,6 +1173,30 @@ document.getElementById("auto-mode")!.addEventListener("change", async (e) => {
     pushEvent("err", `auto toggle: ${msg}`);
   }
 });
+{
+  const skillEl = document.getElementById("skill-knob") as HTMLInputElement | null;
+  const skillLabel = document.getElementById("skill-value");
+  if (skillEl) {
+    // While dragging, only update the label — don't spam the server.
+    skillEl.addEventListener("input", () => {
+      if (skillLabel) skillLabel.textContent = skillEl.value;
+    });
+    // Commit on release / keyboard step.
+    skillEl.addEventListener("change", async () => {
+      const next = parseInt(skillEl.value, 10);
+      if (!Number.isFinite(next)) return;
+      const prev = skill;
+      try {
+        await setSkillOnServer(next);
+      } catch (err) {
+        skill = prev;
+        syncSkillUI();
+        const msg = err instanceof Error ? err.message : String(err);
+        pushEvent("err", `skill: ${msg}`);
+      }
+    });
+  }
+}
 document.getElementById("cam-toggle")!.addEventListener("click", toggleCamera);
 document.querySelectorAll(".inline-error").forEach((pop) => {
   pop.addEventListener("click", () => {
@@ -1186,6 +1242,7 @@ renderBoard();
 renderMaterial();
 renderTape();
 renderTopStatus();
+syncSkillUI();
 
 if (mockMode) {
   setStatus("mock", "warn");

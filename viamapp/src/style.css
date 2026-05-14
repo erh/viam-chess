@@ -192,6 +192,55 @@ a.machine-name[href]:hover { text-decoration: underline; }
 }
 .auto-toggle:has(input:checked) .eyebrow-xxs { color: var(--accent); }
 
+.skill-knob {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  padding: 4px 10px;
+  border: 1px solid var(--line-1);
+  border-radius: 2px;
+  background: var(--bg-2);
+  height: 26px;
+  transition: border-color 100ms ease;
+}
+.skill-knob:hover { border-color: var(--line-2); }
+.skill-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 96px;
+  height: 4px;
+  background: var(--line-1);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  margin: 0;
+}
+.skill-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+.skill-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+.skill-value {
+  min-width: 22px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .inline-ctl { position: relative; }
 .inline-ctl-row {
   display: flex;
@@ -720,6 +769,11 @@ a.machine-name[href]:hover { text-decoration: underline; }
 .app.kiosk .inline-input.sq { width: 56px; }
 .app.kiosk .auto-toggle { height: 40px; padding: 4px 12px; gap: 8px; }
 .app.kiosk .auto-toggle input { width: 16px; height: 16px; }
+.app.kiosk .skill-knob { height: 40px; padding: 4px 14px; gap: 10px; }
+.app.kiosk .skill-range { width: 132px; }
+.app.kiosk .skill-range::-webkit-slider-thumb { width: 14px; height: 14px; }
+.app.kiosk .skill-range::-moz-range-thumb { width: 14px; height: 14px; }
+.app.kiosk .skill-value { font-size: 13px; min-width: 26px; }
 .app.kiosk .vrule { height: 28px; }
 .app.kiosk .vrule.short { height: 24px; }
 
