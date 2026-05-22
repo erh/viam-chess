@@ -100,13 +100,31 @@ type PieceFinderConfig struct {
 	ColorDivergenceGuard    float64 `json:"color-divergence-guard"`    // default 60.0
 	MinTopFootprintMM       float64 `json:"min-top-footprint-mm"`      // default 5.0 mm
 	BrightnessThreshold     float64 `json:"brightness-threshold"`      // default 128.0 (mean RGB)
+
+	// ColorModel is an optional vision service whose detections override the
+	// per-square color decided by the heuristic classifier. The ML service is
+	// run against piece-finder's own `Input` camera (the cropped board image),
+	// so ML bboxes and `originalBounds` share the same coordinate space.
+	ColorModel string `json:"color-model"`
+
+	// CropOriginX/Y is the pixel offset of the cropped board image's (0,0)
+	// inside the image the ML model was actually trained on. Default (0,0) is
+	// the common case (ML model trained on the cropped image too); set this
+	// if the model expects full-image-space coordinates and you want bboxes
+	// translated before overlap-testing.
+	CropOriginX int `json:"crop-origin-x"`
+	CropOriginY int `json:"crop-origin-y"`
 }
 
 func (cfg *PieceFinderConfig) Validate(path string) ([]string, []string, error) {
 	if cfg.Input == "" {
 		return nil, nil, fmt.Errorf("need an input")
 	}
-	return []string{cfg.Input}, nil, nil
+	var optional []string
+	if cfg.ColorModel != "" {
+		optional = append(optional, cfg.ColorModel)
+	}
+	return []string{cfg.Input}, optional, nil
 }
 
 func (cfg *PieceFinderConfig) toClassifyConfig() classifyConfig {
@@ -165,6 +183,14 @@ func NewPieceFinder(ctx context.Context, deps resource.Dependencies, name resour
 		logger.Errorf("can't get framesystem: %v", err)
 	}
 
+	if conf.ColorModel != "" {
+		bc.colorModel, err = vision.FromProvider(deps, conf.ColorModel)
+		if err != nil {
+			logger.Warnf("color-model %q not yet available, falling back to heuristic color: %v", conf.ColorModel, err)
+			bc.colorModel = nil
+		}
+	}
+
 	return bc, nil
 }
 
@@ -176,9 +202,10 @@ type PieceFinder struct {
 	conf   *PieceFinderConfig
 	logger logging.Logger
 
-	rfs   framesystem.Service
-	input camera.Camera
-	props camera.Properties
+	rfs        framesystem.Service
+	input      camera.Camera
+	props      camera.Properties
+	colorModel vision.Service
 }
 
 type squareInfo struct {
@@ -242,6 +269,74 @@ func computeSquareBounds(corners []image.Point, col, row int, squareInset float6
 	bounds.Max.Y -= inset
 
 	return bounds
+}
+
+// mlLabelToColor maps an ML detection label to the piece-finder color int.
+// Returns 0 ("no opinion") for unrecognized labels — callers treat 0 as a
+// signal to keep the existing color.
+func mlLabelToColor(label string) int {
+	l := strings.ToLower(label)
+	switch {
+	case strings.HasPrefix(l, "white"):
+		return 1
+	case strings.HasPrefix(l, "black"):
+		return 2
+	default:
+		return 0
+	}
+}
+
+// pickOverlappingDetection returns the highest-confidence detection whose
+// bounding box has a non-empty intersection with rect. Returns nil if none
+// overlap. rect must be in the same coordinate space as the detections.
+func pickOverlappingDetection(rect image.Rectangle, dets []objectdetection.Detection) objectdetection.Detection {
+	var best objectdetection.Detection
+	bestScore := -1.0
+	for _, d := range dets {
+		bb := d.BoundingBox()
+		if bb == nil {
+			continue
+		}
+		if !rect.Overlaps(*bb) {
+			continue
+		}
+		if d.Score() > bestScore {
+			best = d
+			bestScore = d.Score()
+		}
+	}
+	return best
+}
+
+// mergeMLColors overrides each square's heuristic-derived color with the
+// color implied by an overlapping ML detection. Conflict policy:
+//   - Squares the heuristic marked empty (color == 0) are never modified —
+//     the ML model cannot add pieces.
+//   - Squares the heuristic marked occupied keep the heuristic color when
+//     no ML detection overlaps (presence conflict, trust the heuristic).
+//
+// cropOrigin is the offset of the cropped board image's (0,0) inside the
+// full image; it's added to each square's `originalBounds` so the overlap
+// test runs in the same coordinate space as the ML detections.
+func mergeMLColors(squares []squareInfo, dets []objectdetection.Detection, cropOrigin image.Point, logger logging.Logger) {
+	for i := range squares {
+		if squares[i].color == 0 {
+			continue
+		}
+		squareInFull := squares[i].originalBounds.Add(cropOrigin)
+		best := pickOverlappingDetection(squareInFull, dets)
+		if best == nil {
+			continue
+		}
+		c := mlLabelToColor(best.Label())
+		if c == 0 {
+			continue
+		}
+		if c != squares[i].color {
+			logger.Debugf("ml override %s: %d -> %d (label=%q score=%.2f)", squares[i].name, squares[i].color, c, best.Label(), best.Score())
+		}
+		squares[i].color = c
+	}
 }
 
 func findBoardAndPieces(ctx context.Context, srcImg image.Image, pc pointcloud.PointCloud, props camera.Properties, logger logging.Logger, cc classifyConfig) ([]squareInfo, error) {
@@ -968,9 +1063,14 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 
 	ret := viscapture.VisCapture{}
 
-	// Fetch image and point cloud in parallel — they are independent camera reads
+	// Fetch image, point cloud, and (optionally) ML detections in parallel.
+	// The ML call uses its own camera (full image), so it's independent of the
+	// piece-finder's input camera reads. ML errors are swallowed inside the
+	// goroutine — they degrade to "no color override" rather than failing the
+	// whole capture.
 	var ni []camera.NamedImage
 	var pc pointcloud.PointCloud
+	var mlDets []objectdetection.Detection
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.Go(func() error {
 		_, span2 := trace.StartSpan(egCtx, "PieceFinder::CaptureAllFromCamera::Images")
@@ -986,6 +1086,19 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		span2.End()
 		return err
 	})
+	if bc.colorModel != nil {
+		eg.Go(func() error {
+			_, span2 := trace.StartSpan(egCtx, "PieceFinder::CaptureAllFromCamera::ColorModelDetections")
+			defer span2.End()
+			dets, err := bc.colorModel.DetectionsFromCamera(egCtx, bc.conf.Input, nil)
+			if err != nil {
+				bc.logger.Warnf("color-model detections failed, falling back to heuristic color: %v", err)
+				return nil
+			}
+			mlDets = dets
+			return nil
+		})
+	}
 	if err := eg.Wait(); err != nil {
 		return ret, err
 	}
@@ -1038,12 +1151,19 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 		return ret, err
 	}
 
+	if len(mlDets) > 0 {
+		_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::MergeMLColors")
+		mergeMLColors(squares, mlDets, image.Point{X: bc.conf.CropOriginX, Y: bc.conf.CropOriginY}, bc.logger)
+		span2.End()
+	}
+
 	// Process all 64 squares in parallel — transforms and pickup center calculations are independent
 	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::ParallelSquareTransforms")
 	ret.Objects = make([]*viz.Object, len(squares))
 	ret.Detections = make([]objectdetection.Detection, len(squares)*2)
 
 	eg2, egCtx2 := errgroup.WithContext(ctx)
+	eg2.SetLimit(16)
 	for i, s := range squares {
 		i, s := i, s
 		eg2.Go(func() error {
