@@ -446,7 +446,10 @@ func (s *viamChessChess) checkPositionForMoves(ctx context.Context, all viscaptu
 			}
 		}
 
-		if len(differences) == 2 || len(differences) == 0 {
+		if len(differences) == 0 {
+			break
+		}
+		if len(differences) == 2 && !isCastleSquarePair(from, to) {
 			break
 		}
 
@@ -509,49 +512,30 @@ func (s *viamChessChess) checkPositionForMoves(ctx context.Context, all viscaptu
 				return nil, err
 			}
 
-			// 2-diff means the human only moved the king; we move the rook.
-			// nil theState forces camera-driven occupancy reads.
-			if len(differences) == 2 {
-				var rookFrom, rookTo string
-				switch {
-				case m.HasTag(chess.KingSideCastle) && from == chess.E1:
-					rookFrom, rookTo = "h1", "f1"
-				case m.HasTag(chess.QueenSideCastle) && from == chess.E1:
-					rookFrom, rookTo = "a1", "d1"
-				case m.HasTag(chess.KingSideCastle) && from == chess.E8:
-					rookFrom, rookTo = "h8", "f8"
-				case m.HasTag(chess.QueenSideCastle) && from == chess.E8:
-					rookFrom, rookTo = "a8", "d8"
-				}
-				// Skip if camera says the human already moved the rook (classifier
-				// missed those 2 diffs); avoids grabbing air from the rook home.
-				if rookFrom != "" {
-					if rookOrig := s.findObject(all, rookFrom); rookOrig != nil &&
-						strings.HasSuffix(rookOrig.Geometry.Label(), "-0") {
-						s.logger.Infof("castle: rook source %s is empty, skipping", rookFrom)
-						rookFrom = ""
-					}
-				}
-				if rookFrom != "" {
-					if rookDest := s.findObject(all, rookTo); rookDest != nil &&
-						!strings.HasSuffix(rookDest.Geometry.Label(), "-0") {
-						s.logger.Infof("castle: rook destination %s already occupied, skipping", rookTo)
-						rookFrom = ""
-					}
-				}
-				if rookFrom != "" {
-					s.logger.Infof("castle detected: moving rook %s -> %s", rookFrom, rookTo)
-					if err = s.movePiece(ctx, all, nil, rookFrom, rookTo, nil, nil); err != nil {
-						return nil, fmt.Errorf("castle rook move failed: %w", err)
-					}
-				}
-			}
-
 			return &m, nil
 		}
 	}
 
 	return nil, fmt.Errorf("no valid moves from: %s to %s found out of %d", squareToString(from), squareToString(to), len(moves))
+}
+
+// isCastleSquarePair reports whether (from, to) is the king's from/to for any
+// of the four castling moves. Used to defer move resolution while a human is
+// mid-castle: after the king has moved but before the rook has, the camera sees
+// only 2 diffs and the engine would otherwise commit the move as a castle and
+// race the human to the rook.
+func isCastleSquarePair(from, to chess.Square) bool {
+	switch {
+	case from == chess.E1 && to == chess.G1:
+		return true
+	case from == chess.E1 && to == chess.C1:
+		return true
+	case from == chess.E8 && to == chess.G8:
+		return true
+	case from == chess.E8 && to == chess.C8:
+		return true
+	}
+	return false
 }
 
 func squaresSame(a, b []chess.Square) bool {
