@@ -33,7 +33,6 @@ type cmdStruct struct {
 	CompanionConfig bool   `mapstructure:"companion-config"`
 	Auto            *bool    // pointer so explicit false is distinguishable from absent
 	SetAnnounce     *bool    `mapstructure:"set-announce"` // pointer so explicit false is distinguishable from absent
-	Skill           *float64 // pointer so explicit 0 is distinguishable from absent
 }
 
 func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interface{}) (map[string]interface{}, error) {
@@ -53,7 +52,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            s.autoEnabled.Load(),
-				"skill":           s.skillAdjust,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -120,10 +118,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		s.logger.Infof("announce set to %v", *cmd.SetAnnounce)
 		return map[string]interface{}{"announce": *cmd.SetAnnounce}, nil
 	}
-	if cmd.Skill != nil {
-		s.skillAdjust = *cmd.Skill
-		return map[string]interface{}{"skill": s.skillAdjust}, nil
-	}
 	if cmd.BoardSnapshot {
 		// Fast path: read the loop-populated cache; no per-call capture.
 		s.boardCache.mu.RLock()
@@ -134,7 +128,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            s.autoEnabled.Load(),
-				"skill":           s.skillAdjust,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -167,7 +160,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			"white_graveyard": whiteGY,
 			"black_graveyard": blackGY,
 			"auto":            s.autoEnabled.Load(),
-			"skill":           s.skillAdjust,
 			"captured_at_ms":  time.Now().UnixMilli(),
 			"event":           events.Event,
 			"outcome":         events.Outcome,

@@ -81,10 +81,6 @@ type viamChessChess struct {
 	// refresh always run.
 	autoEnabled atomic.Bool
 
-	// skillAdjust is a client-visible skill level (0–100) surfaced in
-	// board-snapshot and settable via the "skill" DoCommand key.
-	skillAdjust float64
-
 	// announceEnabled gates the on_move_target dispatch. Default true.
 	announceEnabled atomic.Bool
 

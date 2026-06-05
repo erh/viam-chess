@@ -129,7 +129,7 @@ body {
 .input:focus { border-color: var(--accent); }
 .input.mono { font-family: var(--font-mono); }
 .input::placeholder { color: var(--text-4); }
-.inline-input { width: 40px; text-align: center; }
+.inline-input { width: 72px; text-align: center; }
 .inline-input.sq { width: 42px; }
 .input.error { border-color: var(--danger); }
 
@@ -192,54 +192,6 @@ a.machine-name[href]:hover { text-decoration: underline; }
 }
 .auto-toggle:has(input:checked) .eyebrow-xxs { color: var(--accent); }
 
-.skill-knob {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  user-select: none;
-  padding: 4px 10px;
-  border: 1px solid var(--line-1);
-  border-radius: 2px;
-  background: var(--bg-2);
-  height: 26px;
-  transition: border-color 100ms ease;
-}
-.skill-knob:hover { border-color: var(--line-2); }
-.skill-range {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 96px;
-  height: 4px;
-  background: var(--line-1);
-  border-radius: 2px;
-  outline: none;
-  cursor: pointer;
-  margin: 0;
-}
-.skill-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  border: none;
-}
-.skill-range::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  border: none;
-}
-.skill-value {
-  min-width: 22px;
-  text-align: right;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
 
 .inline-ctl { position: relative; }
 .inline-ctl-row {
@@ -815,15 +767,10 @@ select.input option { background: var(--bg-2); color: var(--text-1); }
 .app.kiosk .btn { height: 40px; padding: 0 16px; font-size: 14px; }
 .app.kiosk .btn-sm { height: 34px; padding: 0 12px; font-size: 13px; }
 .app.kiosk .input { height: 40px; padding: 0 10px; font-size: 14px; }
-.app.kiosk .inline-input { width: 52px; }
+.app.kiosk .inline-input { width: 84px; }
 .app.kiosk .inline-input.sq { width: 56px; }
 .app.kiosk .auto-toggle { height: 40px; padding: 4px 12px; gap: 8px; }
 .app.kiosk .auto-toggle input { width: 16px; height: 16px; }
-.app.kiosk .skill-knob { height: 40px; padding: 4px 14px; gap: 10px; }
-.app.kiosk .skill-range { width: 132px; }
-.app.kiosk .skill-range::-webkit-slider-thumb { width: 14px; height: 14px; }
-.app.kiosk .skill-range::-moz-range-thumb { width: 14px; height: 14px; }
-.app.kiosk .skill-value { font-size: 13px; min-width: 26px; }
 .app.kiosk .vrule { height: 28px; }
 .app.kiosk .vrule.short { height: 24px; }
 
