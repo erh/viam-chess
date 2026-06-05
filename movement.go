@@ -3,6 +3,7 @@ package viamchess
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -74,16 +75,17 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 	grabZ := s.conf.grabZ()
 	grabZTall := s.conf.grabZTall()
 
+	var pieceBoard *chess.Board
+	if theState != nil {
+		pieceBoard = theState.game.Position().Board()
+	} else if board != nil {
+		pieceBoard = board
+	}
+
 	pickupZ := grabZ
 	if pickupZOverride > 0 {
 		pickupZ = pickupZOverride
 	} else {
-		var pieceBoard *chess.Board
-		if theState != nil {
-			pieceBoard = theState.game.Position().Board()
-		} else if board != nil {
-			pieceBoard = board
-		}
 		if pieceBoard != nil && len(from) == 2 {
 			sq := chess.NewSquare(chess.File(from[0]-'a'), chess.Rank(from[1]-'1'))
 			pt := pieceBoard.Piece(sq).Type()
@@ -97,6 +99,11 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 		}
 	}
 
+	// In the two rows closest to the arm (ranks 7 & 8), the gripper joint can
+	// clip a tall piece (king/queen) sitting directly left or right of the
+	// pickup square. Tilt the approach toward the arm to clear it.
+	pickupTiltX := s.pickupTiltX(pieceBoard, from)
+
 	{
 		xy, err := s.getSquareXY(from, data)
 		if err != nil {
@@ -108,7 +115,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 			return err
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ})
+		err = s.moveGripperTilt(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ}, pickupTiltX)
 		if err != nil {
 			return err
 		}
@@ -120,7 +127,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 				return false, err
 			}
 			time.Sleep(500 * time.Millisecond)
-			if err := s.moveGripper(ctx, pos); err != nil {
+			if err := s.moveGripperTilt(ctx, pos, pickupTiltX); err != nil {
 				return false, err
 			}
 			return s.myGrab(ctx)
@@ -141,7 +148,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 			return fmt.Errorf("couldn't grab piece at %s after 2 attempts", from)
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ})
+		err = s.moveGripperTilt(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ}, pickupTiltX)
 		if err != nil {
 			return err
 		}
@@ -252,6 +259,38 @@ func (s *viamChessChess) setupGripper(ctx context.Context) error {
 }
 
 func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
+	return s.moveGripperTilt(ctx, p, 0)
+}
+
+// pickupTiltX returns the extra approach-vector X tilt (toward the arm) to apply
+// when picking up a piece in the near rows (ranks 7 & 8) that has a king or
+// queen on a file-adjacent (left/right) square, where the gripper joint would
+// otherwise clip it. Returns 0 when no tilt is needed. The sign matches the
+// reach-compensation tilt in moveGripperTilt, which already leans toward the arm.
+func (s *viamChessChess) pickupTiltX(board *chess.Board, from string) float64 {
+	if board == nil || len(from) != 2 {
+		return 0
+	}
+	if from[1] != '7' && from[1] != '8' {
+		return 0
+	}
+	file := int(from[0] - 'a')
+	rank := chess.Rank(from[1] - '1')
+	for _, nf := range []int{file - 1, file + 1} {
+		if nf < 0 || nf > 7 {
+			continue
+		}
+		pt := board.Piece(chess.NewSquare(chess.File(nf), rank)).Type()
+		if pt == chess.King || pt == chess.Queen {
+			return math.Tan(s.conf.nearTallTiltDeg() * math.Pi / 180)
+		}
+	}
+	return 0
+}
+
+// extraTiltX is added to the approach vector's X component (after the built-in
+// reach/edge compensation) to lean the gripper further toward the arm.
+func (s *viamChessChess) moveGripperTilt(ctx context.Context, p r3.Vector, extraTiltX float64) error {
 	ctx, span := trace.StartSpan(ctx, "moveGripper")
 	defer span.End()
 
@@ -268,6 +307,8 @@ func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
 		orientation.OY = (p.Y + 300) / 300
 		orientation.OX += .2
 	}
+
+	orientation.OX += extraTiltX
 
 	myPose := spatialmath.NewPose(p, orientation)
 	myConstraints := &motionplan.Constraints{}

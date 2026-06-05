@@ -25,6 +25,7 @@ type ChessConfig struct {
 
 	GrabZ             float64 `json:"grab-z"`              // mm, default 40
 	GrabZTall         float64 `json:"grab-z-tall"`         // mm, default 80 (king/queen)
+	NearTallTiltDeg   float64 `json:"near-tall-tilt-deg"`  // deg, default 20; tilt toward arm when picking up in ranks 7-8 next to a king/queen
 	GraveyardSpacingY float64 `json:"graveyard-spacing-y"` // mm/row, default 80
 	GraveyardZ        float64 `json:"graveyard-z"`         // mm, default 60
 	GripperOpenPos    float64 `json:"gripper-open-pos"`    // default 450
@@ -77,6 +78,13 @@ func (cfg *ChessConfig) grabZTall() float64 {
 		return 80.0
 	}
 	return cfg.GrabZTall
+}
+
+func (cfg *ChessConfig) nearTallTiltDeg() float64 {
+	if cfg.NearTallTiltDeg <= 0 {
+		return 20.0
+	}
+	return cfg.NearTallTiltDeg
 }
 
 func (cfg *ChessConfig) graveyardSpacingY() float64 {
