@@ -26,22 +26,27 @@ func (s *viamChessChess) pickMove(ctx context.Context, game *chess.Game) (*chess
 		}
 		picked = &moves[0]
 	} else {
-		multiplier := 1.0
-		if s.skillAdjust < 50 {
-			multiplier = float64(s.skillAdjust) / 50.0
-			s.logger.Infof("multiplier: %v", multiplier)
-		} else if s.skillAdjust > 50 {
-			multiplier = float64(s.skillAdjust-50) * 2
-			s.logger.Infof("multiplier: %v", multiplier)
-		}
-
 		cmdPos := uci.CmdPosition{Position: game.Position()}
-		cmdGo := uci.CmdGo{MoveTime: time.Millisecond * time.Duration(float64(s.conf.engineMillis())*multiplier)}
+		cmdGo := uci.CmdGo{MoveTime: time.Millisecond * time.Duration(s.conf.engineMillis())}
 		err := s.engine.Run(cmdPos, cmdGo)
 		if err != nil {
 			return nil, err
 		}
-		picked = s.engine.SearchResults().BestMove
+		sr := s.engine.SearchResults()
+		picked = sr.BestMove
+
+		// Normalize score to white-relative: UCI scores are from the side-to-move's
+		// perspective, so negate when it was black's turn.
+		cp := int32(sr.Info.Score.CP)
+		mate := int32(sr.Info.Score.Mate)
+		if game.Position().Turn() == chess.Black {
+			cp = -cp
+			if mate != 0 {
+				mate = -mate
+			}
+		}
+		s.lastScoreCP.Store(cp)
+		s.lastScoreMate.Store(mate)
 	}
 
 	// Auto-queen.

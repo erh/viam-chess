@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,8 +64,7 @@ type viamChessChess struct {
 	motion motion.Service
 	rfs    framesystem.Service
 
-	startPose   *referenceframe.PoseInFrame
-	skillAdjust float64
+	startPose *referenceframe.PoseInFrame
 
 	engine *uci.Engine
 
@@ -87,6 +87,15 @@ type viamChessChess struct {
 	// onMoveTarget receives a "move_made" domain event after every successful
 	// engine move (whether triggered by cmd.Go or auto-mode). nil = disabled.
 	onMoveTarget resource.Resource
+
+	// lastScoreCP is the most recent engine evaluation in centipawns,
+	// normalized to white-relative (positive = white ahead).
+	// Updated after every engine move; zero before the first move or when
+	// no engine is configured.
+	lastScoreCP atomic.Int32
+	// lastScoreMate is the most recent engine-detected moves-to-forced-mate,
+	// white-relative (positive = white mates, negative = black mates, 0 = none).
+	lastScoreMate atomic.Int32
 
 	// boardCache holds the last camera-derived snapshot, populated by the
 	// board loop and read by board-snapshot. Guarded by mu.
@@ -119,12 +128,11 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
 	s := &viamChessChess{
-		name:        name,
-		logger:      logger,
-		conf:        conf,
-		cancelFunc:  cancelFunc,
-		skillAdjust: conf.initialSkillAdjust(),
-		squareXY:    make(map[string]r3.Vector),
+		name:       name,
+		logger:     logger,
+		conf:       conf,
+		cancelFunc: cancelFunc,
+		squareXY:   make(map[string]r3.Vector),
 	}
 
 	s.pieceFinder, err = vision.FromProvider(deps, conf.PieceFinder)
@@ -203,7 +211,36 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, err
 	}
 
+	if _, err := s.applyElo(conf.initialElo()); err != nil {
+		s.cancelFunc()
+		return nil, fmt.Errorf("applying initial elo: %w", err)
+	}
+
 	return s, nil
+}
+
+// applyElo sets the engine to target a specific Elo rating via UCI_LimitStrength.
+// The value is clamped to the engine's reported UCI_Elo min/max with a warning.
+// Returns the clamped ELO that was actually applied.
+func (s *viamChessChess) applyElo(elo int) (int, error) {
+	if s.engine == nil {
+		return elo, nil
+	}
+	if opt, ok := s.engine.Options()["UCI_Elo"]; ok {
+		if min, err := strconv.Atoi(opt.Min); err == nil && elo < min {
+			s.logger.Warnf("ELO %d is below the engine minimum of %d, clamping", elo, min)
+			elo = min
+		}
+		if max, err := strconv.Atoi(opt.Max); err == nil && elo > max {
+			s.logger.Warnf("ELO %d exceeds the engine maximum of %d, clamping", elo, max)
+			elo = max
+		}
+	}
+	return elo, s.engine.Run(
+		uci.CmdSetOption{Name: "Skill Level", Value: "20"},
+		uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
+		uci.CmdSetOption{Name: "UCI_Elo", Value: fmt.Sprintf("%d", elo)},
+	)
 }
 
 func (s *viamChessChess) Name() resource.Name {

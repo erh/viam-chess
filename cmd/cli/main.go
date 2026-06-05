@@ -36,13 +36,14 @@ func realMain() error {
 
 	host := flag.String("host", "", "host")
 	debug := flag.Bool("debug", false, "")
-	cmd := flag.String("cmd", "", "command to execute (move, go, reset, wipe, skill, play-fen, etc..)")
+	cmd := flag.String("cmd", "", "command to execute (move, go, reset, wipe, difficulty, play-fen, etc..)")
 
 	from := flag.String("from", "", "")
 	to := flag.String("to", "", "")
 	n := flag.Int("n", 1, "")
 	fenFile := flag.String("fen-file", "", "path to PGN file for play-fen command")
-	skill := flag.Float64("skill", 0, "engine skill level (0-100) for skill command")
+	difficulty := flag.String("difficulty", "", "named difficulty for difficulty command: beginner, intermediate, advanced, expert, impossible")
+	elo := flag.Int("elo", 0, "numeric ELO for difficulty command (alternative to -difficulty)")
 	on := flag.Bool("on", false, "auto on/off for `auto` command")
 	flag.Parse()
 
@@ -152,6 +153,15 @@ func realMain() error {
 		return nil
 
 	case "go":
+		if *elo > 0 {
+			if _, err := thing.DoCommand(ctx, map[string]interface{}{"difficulty": *elo}); err != nil {
+				return fmt.Errorf("setting difficulty: %w", err)
+			}
+		} else if *difficulty != "" {
+			if _, err := thing.DoCommand(ctx, map[string]interface{}{"difficulty": *difficulty}); err != nil {
+				return fmt.Errorf("setting difficulty: %w", err)
+			}
+		}
 		res, err := thing.DoCommand(ctx, map[string]interface{}{
 			"go": *n,
 		})
@@ -198,13 +208,17 @@ func realMain() error {
 		logger.Infof("res: %v", res)
 		return nil
 
-	case "skill":
-		if *skill <= 0 {
-			return fmt.Errorf("skill requires -skill <0-100>")
+	case "difficulty":
+		var payload map[string]interface{}
+		switch {
+		case *elo > 0:
+			payload = map[string]interface{}{"difficulty": *elo}
+		case *difficulty != "":
+			payload = map[string]interface{}{"difficulty": *difficulty}
+		default:
+			return fmt.Errorf("difficulty requires -difficulty <beginner|intermediate|advanced|expert|impossible> or -elo <value>")
 		}
-		res, err := thing.DoCommand(ctx, map[string]interface{}{
-			"Skill": *skill,
-		})
+		res, err := thing.DoCommand(ctx, payload)
 		if err != nil {
 			return err
 		}

@@ -28,7 +28,8 @@ type ChessConfig struct {
 	GraveyardSpacingY float64 `json:"graveyard-spacing-y"` // mm/row, default 80
 	GraveyardZ        float64 `json:"graveyard-z"`         // mm, default 60
 	GripperOpenPos    float64 `json:"gripper-open-pos"`    // default 450
-	SkillAdjust       float64 `json:"skill-adjust"`        // default 50
+	// Elo sets the engine strength as a target ELO rating. Default 1500.
+	Elo int `json:"elo"`
 
 	BadDiffMaxAttempts int `json:"bad-diff-max-attempts"` // default 10
 
@@ -100,11 +101,11 @@ func (cfg *ChessConfig) gripperOpenPos() float64 {
 	return cfg.GripperOpenPos
 }
 
-func (cfg *ChessConfig) initialSkillAdjust() float64 {
-	if cfg.SkillAdjust <= 0 {
-		return 50.0
+func (cfg *ChessConfig) initialElo() int {
+	if cfg.Elo <= 0 {
+		return 1500
 	}
-	return cfg.SkillAdjust
+	return cfg.Elo
 }
 
 func (cfg *ChessConfig) badDiffMaxAttempts() int {

@@ -90,6 +90,9 @@ let serverAuthoritative = true;
 // so it doesn't re-push the undone move into the tape as a phantom forward move.
 let suppressFenInferOnce = false;
 
+let currentScoreCP = 0;
+let currentScoreMate = 0;
+
 let selectedSq: string | null = null;
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let refreshInFlight = false;
@@ -98,9 +101,6 @@ let busy = false;
 // Auto-mode is now server-side. We mirror the toggle locally just for the
 // checkbox UI; the truth comes from board-snapshot's `auto` field.
 let autoMode = false;
-// Same pattern for skill: server-side `skillAdjust`, mirrored locally for the
-// slider. 50 is neutral; <50 weakens the engine, >50 strengthens it.
-let skill = 50;
 // Active vs idle snapshot cadence. Snapshot reads from a server-side cache
 // (no per-call camera capture), so this is purely about UI freshness.
 const ACTIVE_REFRESH_MS = 500;
@@ -266,6 +266,34 @@ function updateStatusFromMismatches() {
   const suffix = idleMode ? " · idle" : "";
   if (mismatches.length === 0) setStatus("in sync" + suffix, "ok");
   else setStatus(`${mismatches.length} diff${suffix}`, "warn");
+}
+
+// ── Eval bar ───────────────────────────────────────────────────────────────
+
+// Converts centipawns to white's fill percentage (0–100) using the same
+// sigmoid formula lichess uses so the bar feels natural and never hard-clips.
+function cpToWhitePct(cp: number, mate: number): number {
+  if (mate > 0) return 100;
+  if (mate < 0) return 0;
+  return Math.round(50 + 50 * (2 / (1 + Math.exp(-0.004 * cp)) - 1));
+}
+
+function renderEvalBar() {
+  const fill = document.getElementById("eval-bar-fill");
+  const label = document.getElementById("eval-bar-label");
+  if (!fill || !label) return;
+
+  const pct = cpToWhitePct(currentScoreCP, currentScoreMate);
+  fill.style.height = `${pct}%`;
+
+  if (currentScoreMate > 0) {
+    label.textContent = `M${currentScoreMate}`;
+  } else if (currentScoreMate < 0) {
+    label.textContent = `M${-currentScoreMate}`;
+  } else {
+    const abs = Math.abs(currentScoreCP / 100).toFixed(1);
+    label.textContent = currentScoreCP > 0 ? `+${abs}` : currentScoreCP < 0 ? `-${abs}` : "0.0";
+  }
 }
 
 // ── Board rendering ────────────────────────────────────────────────────────
@@ -635,19 +663,19 @@ function applySnapshot(res: Record<string, JsonValue>) {
     const cb = document.getElementById("auto-mode") as HTMLInputElement | null;
     if (cb) cb.checked = autoMode;
   }
-  if (typeof res.skill === "number" && res.skill !== skill) {
-    skill = res.skill;
-    syncSkillUI();
-  }
   cameraBoard =
     res.camera_board && typeof res.camera_board === "object"
       ? (res.camera_board as Record<string, string>)
       : null;
   mismatches = diffCamera(currentBoard, cameraBoard);
 
+  if (typeof res.score_cp === "number") currentScoreCP = res.score_cp as number;
+  if (typeof res.score_mate === "number") currentScoreMate = res.score_mate as number;
+
   renderBoard();
   renderMaterial();
   renderTopStatus();
+  renderEvalBar();
   updateStatusFromMismatches();
 
   // outcome from board-snapshot is now in GameEventsResult format ("white_won", "black_won",
@@ -665,6 +693,8 @@ function applySnapshot(res: Record<string, JsonValue>) {
   if (observedReset) {
     resetTape();
     lastMove = null;
+    currentScoreCP = 0;
+    currentScoreMate = 0;
     pushEvent("reset", "observed reset from another client");
     renderTape();
     renderTopStatus();
@@ -768,6 +798,8 @@ function seedMockState() {
 
   whiteGraveyard = ["P", "P", "N"];
   blackGraveyard = ["p", "b"];
+  currentScoreCP = 52;
+  currentScoreMate = 0;
   currentFen = "r1bqkb1r/1ppp1ppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 3 5";
   const parsed = parseFENPlacement(currentFen);
   currentBoard = parsed.board;
@@ -813,31 +845,6 @@ async function setAutoModeOnServer(enabled: boolean): Promise<boolean> {
     }
   }
   pushEvent("go", `auto: ${enabled ? "on" : "off"}`);
-  return true;
-}
-
-// ── Skill knob ─────────────────────────────────────────────────────────────
-
-function syncSkillUI() {
-  const slider = document.getElementById("skill-knob") as HTMLInputElement | null;
-  const label = document.getElementById("skill-value");
-  if (slider) slider.value = String(Math.round(skill));
-  if (label) label.textContent = String(Math.round(skill));
-}
-
-async function setSkillOnServer(value: number): Promise<boolean> {
-  skill = value;
-  syncSkillUI();
-  if (chessService) {
-    // Pause polling so an in-flight snapshot can't revert the optimistic value.
-    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-    try {
-      await doCommand({ skill: value });
-    } finally {
-      startAutoRefresh();
-    }
-  }
-  pushEvent("go", `skill: ${value}`);
   return true;
 }
 
@@ -1044,6 +1051,21 @@ async function cmdDirectMoveFromInputs() {
   (document.getElementById("move-to") as HTMLInputElement).value = "";
 }
 
+async function cmdSetDifficulty(elo: number) {
+  try {
+    const res = await doCommand({ difficulty: elo });
+    const applied = typeof res.difficulty === "number" ? res.difficulty as number : elo;
+    if (applied !== elo) {
+      pushEvent("go", `difficulty: ELO ${elo} → clamped to ${applied}`);
+    } else {
+      pushEvent("go", `difficulty: ELO ${elo}`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    pushEvent("err", `difficulty: ${msg}`);
+  }
+}
+
 async function cmdMaintenance(id: "refresh" | "snapshot" | "cache" | "wipe" | "reset", skipConfirm = false) {
   if (id === "reset" && !skipConfirm && !confirm("Physically reset the board?")) return;
   if (id === "wipe" && !skipConfirm && !confirm("Wipe game state?")) return;
@@ -1173,31 +1195,17 @@ document.getElementById("auto-mode")!.addEventListener("change", async (e) => {
     pushEvent("err", `auto toggle: ${msg}`);
   }
 });
-{
-  const skillEl = document.getElementById("skill-knob") as HTMLInputElement | null;
-  const skillLabel = document.getElementById("skill-value");
-  if (skillEl) {
-    // While dragging, only update the label — don't spam the server.
-    skillEl.addEventListener("input", () => {
-      if (skillLabel) skillLabel.textContent = skillEl.value;
-    });
-    // Commit on release / keyboard step.
-    skillEl.addEventListener("change", async () => {
-      const next = parseInt(skillEl.value, 10);
-      if (!Number.isFinite(next)) return;
-      const prev = skill;
-      try {
-        await setSkillOnServer(next);
-      } catch (err) {
-        skill = prev;
-        syncSkillUI();
-        const msg = err instanceof Error ? err.message : String(err);
-        pushEvent("err", `skill: ${msg}`);
-      }
-    });
-  }
-}
 document.getElementById("cam-toggle")!.addEventListener("click", toggleCamera);
+document.getElementById("btn-difficulty")!.addEventListener("click", async () => {
+  const elo = parseInt((document.getElementById("difficulty-elo") as HTMLInputElement).value, 10);
+  if (!isNaN(elo)) await cmdSetDifficulty(elo);
+});
+document.getElementById("difficulty-elo")!.addEventListener("keydown", async (e) => {
+  if ((e as KeyboardEvent).key === "Enter") {
+    const elo = parseInt((e.target as HTMLInputElement).value, 10);
+    if (!isNaN(elo)) await cmdSetDifficulty(elo);
+  }
+});
 document.querySelectorAll(".inline-error").forEach((pop) => {
   pop.addEventListener("click", () => {
     if (pop.id === "go-error") dismissInlineError("go");
@@ -1242,7 +1250,7 @@ renderBoard();
 renderMaterial();
 renderTape();
 renderTopStatus();
-syncSkillUI();
+renderEvalBar();
 
 if (mockMode) {
   setStatus("mock", "warn");

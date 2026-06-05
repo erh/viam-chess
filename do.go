@@ -23,7 +23,7 @@ type cmdStruct struct {
 	Go              int
 	Reset           bool
 	Wipe            bool
-	Skill           float64
+	Difficulty      int
 	Hover           string
 	ClearCache      bool `mapstructure:"clear-cache"`
 	Undo            int
@@ -31,8 +31,8 @@ type cmdStruct struct {
 	BoardSnapshot   bool   `mapstructure:"board-snapshot"`
 	GameEvents      bool   `mapstructure:"game-events"`
 	CompanionConfig bool   `mapstructure:"companion-config"`
-	Auto            *bool  // pointer so explicit false is distinguishable from absent
-	SetAnnounce     *bool  `mapstructure:"set-announce"` // pointer so explicit false is distinguishable from absent
+	Auto            *bool    // pointer so explicit false is distinguishable from absent
+	SetAnnounce     *bool    `mapstructure:"set-announce"` // pointer so explicit false is distinguishable from absent
 }
 
 func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interface{}) (map[string]interface{}, error) {
@@ -52,7 +52,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            s.autoEnabled.Load(),
-				"skill":           s.skillAdjust,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -60,6 +59,8 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"turn":            s.boardCache.gameEvents.Turn,
 				"in_check":        s.boardCache.gameEvents.InCheck,
 				"is_over":         s.boardCache.gameEvents.IsOver,
+				"score_cp":        s.boardCache.gameEvents.ScoreCP,
+				"score_mate":      s.boardCache.gameEvents.ScoreMate,
 			}
 			s.boardCache.mu.RUnlock()
 			return result, nil
@@ -86,9 +87,12 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		s.clearSquareCache()
 		return nil, nil
 	}
-	if cmd.Skill > 0 {
-		s.skillAdjust = cmd.Skill
-		return nil, nil
+	if cmd.Difficulty != 0 {
+		applied, err := s.applyElo(cmd.Difficulty)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{"difficulty": applied}, nil
 	}
 	if cmd.Auto != nil {
 		s.autoEnabled.Store(*cmd.Auto)
@@ -109,7 +113,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            s.autoEnabled.Load(),
-				"skill":           s.skillAdjust,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -117,6 +120,8 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"turn":            s.boardCache.gameEvents.Turn,
 				"in_check":        s.boardCache.gameEvents.InCheck,
 				"is_over":         s.boardCache.gameEvents.IsOver,
+				"score_cp":        s.boardCache.gameEvents.ScoreCP,
+				"score_mate":      s.boardCache.gameEvents.ScoreMate,
 			}
 			s.boardCache.mu.RUnlock()
 			return result, nil
@@ -131,6 +136,8 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		if err != nil {
 			return nil, err
 		}
+		events.ScoreCP = int(s.lastScoreCP.Load())
+		events.ScoreMate = int(s.lastScoreMate.Load())
 		_ = s.refreshBoardCache(ctx, all)
 		return map[string]interface{}{
 			"fen":             fen,
@@ -138,7 +145,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			"white_graveyard": whiteGY,
 			"black_graveyard": blackGY,
 			"auto":            s.autoEnabled.Load(),
-			"skill":           s.skillAdjust,
 			"captured_at_ms":  time.Now().UnixMilli(),
 			"event":           events.Event,
 			"outcome":         events.Outcome,
@@ -146,6 +152,8 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			"turn":            events.Turn,
 			"in_check":        events.InCheck,
 			"is_over":         events.IsOver,
+			"score_cp":        events.ScoreCP,
+			"score_mate":      events.ScoreMate,
 		}, nil
 	}
 
@@ -154,7 +162,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		if err != nil {
 			return nil, err
 		}
-		return gameEventsResult(theState.game).Map(), nil
+		result := gameEventsResult(theState.game)
+		result.ScoreCP = int(s.lastScoreCP.Load())
+		result.ScoreMate = int(s.lastScoreMate.Load())
+		return result.Map(), nil
 	}
 
 	if cmd.CompanionConfig {
@@ -320,6 +331,8 @@ func (s *viamChessChess) refreshBoardCache(ctx context.Context, all viscapture.V
 	if err != nil {
 		return err
 	}
+	events.ScoreCP = int(s.lastScoreCP.Load())
+	events.ScoreMate = int(s.lastScoreMate.Load())
 	s.boardCache.mu.Lock()
 	defer s.boardCache.mu.Unlock()
 	s.boardCache.ready = true
@@ -358,17 +371,27 @@ type GameEventsResult struct {
 	InCheck bool `json:"in_check"`
 	// IsOver is true when the game has ended.
 	IsOver bool `json:"is_over"`
+	// ScoreCP is the engine evaluation in centipawns, white-relative.
+	// Positive = white is ahead. 0 before the first engine move or when
+	// no engine is configured.
+	ScoreCP int `json:"score_cp"`
+	// ScoreMate is the engine-detected moves to forced mate, white-relative.
+	// Positive = white mates in N moves, negative = black mates in N moves,
+	// 0 = no forced mate detected.
+	ScoreMate int `json:"score_mate"`
 }
 
 // Map converts the result to the map[string]interface{} format required by DoCommand.
 func (r GameEventsResult) Map() map[string]interface{} {
 	return map[string]interface{}{
-		"event":    r.Event,
-		"outcome":  r.Outcome,
-		"method":   r.Method,
-		"turn":     r.Turn,
-		"in_check": r.InCheck,
-		"is_over":  r.IsOver,
+		"event":      r.Event,
+		"outcome":    r.Outcome,
+		"method":     r.Method,
+		"turn":       r.Turn,
+		"in_check":   r.InCheck,
+		"is_over":    r.IsOver,
+		"score_cp":   r.ScoreCP,
+		"score_mate": r.ScoreMate,
 	}
 }
 

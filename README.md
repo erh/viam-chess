@@ -26,7 +26,7 @@
 | `video-saver` | string | — | optional video-saver resource for clip recording per move |
 | `engine` | string | `stockfish` | UCI engine binary to invoke for opponent moves |
 | `engine-millis` | int | `10` | per-move thinking time for the engine, in milliseconds |
-| `skill-adjust` | float | `50.0` | initial skill knob (multiplier on `engine-millis`); 50 = 1×, <50 weaker, >50 stronger |
+| `difficulty` | string | `intermediate` | initial engine difficulty; see [Difficulty levels](#difficulty-levels) |
 | `capture-dir` | string | — | directory to dump pointcloud/image captures (mostly for VLA data); needs `camera` |
 | `grab-z` | float | `40.0` | gripper Z height (mm) when picking up short pieces (pawn, rook, bishop, knight) |
 | `grab-z-tall` | float | `80.0` | gripper Z height (mm) when picking up tall pieces (king, queen) |
@@ -64,6 +64,20 @@ Reset restores the spare queen back into slot 0 automatically.
 
 Only one promotion per color per game is supported (slot 0 holds a single spare). Undoing through a promotion move is not supported.
 
+## Difficulty levels
+
+Set via the `difficulty` config field or the `difficulty` DoCommand key.
+
+| value | mechanism | approximate strength |
+| --- | --- | --- |
+| `beginner` | Stockfish `Skill Level 0` | ~800–1100 Elo |
+| `intermediate` | `UCI_Elo 1320` | ~1320 Elo |
+| `advanced` | `UCI_Elo 1800` | ~1800 Elo |
+| `expert` | `UCI_Elo 2400` | ~2400 Elo |
+| `impossible` | no limits, full strength | 3000+ Elo |
+
+An unrecognized value logs a warning and falls back to `intermediate`.
+
 ## DoCommand reference
 
 All commands are sent via `DoCommand` on the chess generic service. Pass exactly one of the keys below per call. Squares are lowercase algebraic (`a1`–`h8`).
@@ -75,7 +89,7 @@ All commands are sent via `DoCommand` on the chess generic service. Pass exactly
 | `reset` | `true` | Return every piece to its initial-game home square, including pulling captured pieces back from the graveyard and restoring the spare queen to slot 0 if a promotion happened. |
 | `wipe` | `true` | Clear saved game state and the cached square positions. |
 | `clear-cache` | `true` | Clear only the square-position cache (forces re-scan from the next pointcloud capture). Use after physically nudging the board. |
-| `skill` | `<float>` | Adjust engine strength. 50 = baseline; <50 weaker (linear scale-down of think time), >50 stronger (think time grows by `(skill-50)*2`). |
+| `difficulty` | `"<level>"` | Change engine strength at runtime. See [Difficulty levels](#difficulty-levels). Returns `{"difficulty": "<level>"}`. |
 | `hover` | `"<sq>"` | Move the gripper to ~100 mm above the given square's pickup point and stay there. Does not return home. |
 | `undo` | `<int>` | Physically undo the last N moves (newest-first), restoring captured pieces from the graveyard. Errors if any of the undone moves is a promotion. |
 | `play-fen` | `"<path>"` | Wipe state, then replay every move from a PGN file at the given path. |
@@ -90,6 +104,7 @@ All commands are sent via `DoCommand` on the chess generic service. Pass exactly
 {"hover": "e4"}
 {"reset": true}
 {"undo": 2}
+{"difficulty": "beginner"}
 {"play-fen": "data/sample.pgn"}
 {"board-snapshot": true}
 ```
