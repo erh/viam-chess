@@ -13,6 +13,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/rimage"
+	"go.viam.com/rdk/vision/objectdetection"
 	"go.viam.com/test"
 
 	"github.com/erh/vmodutils/touch"
@@ -310,4 +311,117 @@ func TestPcDiagnose3DImgMeansUseInImgDenominator(t *testing.T) {
 	test.That(t, d.TopMeanAttachedR, test.ShouldAlmostEqual, 255.0, 0.01)
 	test.That(t, d.TopMeanAttachedG, test.ShouldAlmostEqual, 0.0, 0.01)
 	test.That(t, d.TopMeanAttachedB, test.ShouldAlmostEqual, 0.0, 0.01)
+}
+
+func TestMLLabelToColor(t *testing.T) {
+	test.That(t, mlLabelToColor("white"), test.ShouldEqual, 1)
+	test.That(t, mlLabelToColor("White-Pawn"), test.ShouldEqual, 1)
+	test.That(t, mlLabelToColor("white-knight"), test.ShouldEqual, 1)
+	test.That(t, mlLabelToColor("black"), test.ShouldEqual, 2)
+	test.That(t, mlLabelToColor("black-king"), test.ShouldEqual, 2)
+	test.That(t, mlLabelToColor("BLACK-QUEEN"), test.ShouldEqual, 2)
+	test.That(t, mlLabelToColor(""), test.ShouldEqual, 0)
+	test.That(t, mlLabelToColor("other"), test.ShouldEqual, 0)
+	test.That(t, mlLabelToColor("piece"), test.ShouldEqual, 0)
+}
+
+// imgBounds for objectdetection.NewDetection — not actually used by Overlaps,
+// but the constructor requires it. Make it big enough to contain every test bbox.
+var mlTestImgBounds = image.Rect(0, 0, 10000, 10000)
+
+func mlDet(box image.Rectangle, score float64, label string) objectdetection.Detection {
+	return objectdetection.NewDetection(mlTestImgBounds, box, score, label)
+}
+
+func TestPickOverlappingDetection(t *testing.T) {
+	rect := image.Rect(100, 100, 200, 200)
+
+	// Empty list.
+	test.That(t, pickOverlappingDetection(rect, nil), test.ShouldBeNil)
+
+	// No overlap.
+	none := []objectdetection.Detection{
+		mlDet(image.Rect(0, 0, 50, 50), 0.9, "white-pawn"),
+		mlDet(image.Rect(300, 300, 400, 400), 0.95, "black-king"),
+	}
+	test.That(t, pickOverlappingDetection(rect, none), test.ShouldBeNil)
+
+	// One overlap.
+	one := []objectdetection.Detection{
+		mlDet(image.Rect(0, 0, 50, 50), 0.9, "white-pawn"),
+		mlDet(image.Rect(150, 150, 250, 250), 0.7, "black-pawn"),
+	}
+	got := pickOverlappingDetection(rect, one)
+	test.That(t, got, test.ShouldNotBeNil)
+	test.That(t, got.Label(), test.ShouldEqual, "black-pawn")
+
+	// Multiple overlaps — highest confidence wins.
+	multi := []objectdetection.Detection{
+		mlDet(image.Rect(150, 150, 250, 250), 0.6, "black-pawn"),
+		mlDet(image.Rect(110, 110, 190, 190), 0.95, "white-knight"),
+		mlDet(image.Rect(180, 180, 220, 220), 0.5, "black-bishop"),
+	}
+	got = pickOverlappingDetection(rect, multi)
+	test.That(t, got, test.ShouldNotBeNil)
+	test.That(t, got.Label(), test.ShouldEqual, "white-knight")
+}
+
+func TestMergeMLColors(t *testing.T) {
+	logger := logging.NewTestLogger(t)
+
+	// Squares laid out in a simple grid; their coordinate space is the
+	// "cropped" image. ML detections will be in the "full" image space,
+	// offset by cropOrigin.
+	cropOrigin := image.Point{X: 1000, Y: 500}
+	squares := []squareInfo{
+		// 0: piece-finder says white (1), ML overlap says black → override to 2.
+		{name: "a1", originalBounds: image.Rect(0, 0, 100, 100), color: 1},
+		// 1: piece-finder says black (2), ML overlap says white → override to 1.
+		{name: "a2", originalBounds: image.Rect(100, 0, 200, 100), color: 2},
+		// 2: piece-finder says white (1), NO ML overlap → keep 1.
+		{name: "a3", originalBounds: image.Rect(200, 0, 300, 100), color: 1},
+		// 3: piece-finder says EMPTY (0), ML has an overlapping detection → MUST stay 0.
+		{name: "a4", originalBounds: image.Rect(300, 0, 400, 100), color: 0},
+		// 4: piece-finder says white (1), overlapping ML has unrecognized label → keep 1.
+		{name: "a5", originalBounds: image.Rect(400, 0, 500, 100), color: 1},
+		// 5: piece-finder says black (2), two overlapping ML dets at different scores → higher wins.
+		{name: "a6", originalBounds: image.Rect(500, 0, 600, 100), color: 2},
+	}
+
+	// All detection bboxes are translated into FULL-image coords by adding cropOrigin.
+	dets := []objectdetection.Detection{
+		// Overlaps a1 (full coords 1000,500 → 1100,600). Says black.
+		mlDet(image.Rect(1050, 550, 1080, 590), 0.9, "black-rook"),
+		// Overlaps a2. Says white.
+		mlDet(image.Rect(1100, 500, 1200, 600), 0.85, "white-bishop"),
+		// Note: a3 has no detection.
+		// Overlaps a4 (empty square). Should be ignored because color==0.
+		mlDet(image.Rect(1310, 510, 1390, 590), 0.95, "white-queen"),
+		// Overlaps a5 with unrecognized label.
+		mlDet(image.Rect(1420, 520, 1480, 580), 0.99, "unknown-label"),
+		// Two overlaps on a6 — higher-score "white" wins.
+		mlDet(image.Rect(1510, 510, 1590, 590), 0.4, "black-pawn"),
+		mlDet(image.Rect(1520, 520, 1580, 580), 0.92, "white-king"),
+	}
+
+	mergeMLColors(squares, dets, cropOrigin, logger)
+
+	test.That(t, squares[0].color, test.ShouldEqual, 2) // flipped 1 -> 2
+	test.That(t, squares[1].color, test.ShouldEqual, 1) // flipped 2 -> 1
+	test.That(t, squares[2].color, test.ShouldEqual, 1) // no det, kept
+	test.That(t, squares[3].color, test.ShouldEqual, 0) // was empty, must stay empty
+	test.That(t, squares[4].color, test.ShouldEqual, 1) // unrecognized label, kept
+	test.That(t, squares[5].color, test.ShouldEqual, 1) // higher-score white wins
+}
+
+func TestMergeMLColorsNoOpWhenNoCropOrigin(t *testing.T) {
+	logger := logging.NewTestLogger(t)
+	squares := []squareInfo{
+		{name: "e4", originalBounds: image.Rect(400, 400, 500, 500), color: 1},
+	}
+	dets := []objectdetection.Detection{
+		mlDet(image.Rect(420, 420, 480, 480), 0.9, "black-knight"),
+	}
+	mergeMLColors(squares, dets, image.Point{}, logger)
+	test.That(t, squares[0].color, test.ShouldEqual, 2)
 }
