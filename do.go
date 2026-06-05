@@ -23,7 +23,7 @@ type cmdStruct struct {
 	Go              int
 	Reset           bool
 	Wipe            bool
-	Difficulty      interface{}
+	Difficulty      int
 	Hover           string
 	ClearCache      bool `mapstructure:"clear-cache"`
 	Undo            int
@@ -87,27 +87,12 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		s.clearSquareCache()
 		return nil, nil
 	}
-	if cmd.Difficulty != nil {
-		switch v := cmd.Difficulty.(type) {
-		case string:
-			if err := s.applyDifficulty(v); err != nil {
-				return nil, err
-			}
-			return map[string]interface{}{"difficulty": v}, nil
-		case int:
-			if err := s.applyElo(v); err != nil {
-				return nil, err
-			}
-			return map[string]interface{}{"difficulty": v}, nil
-		case float64:
-			elo := int(v)
-			if err := s.applyElo(elo); err != nil {
-				return nil, err
-			}
-			return map[string]interface{}{"difficulty": elo}, nil
-		default:
-			return nil, fmt.Errorf("difficulty must be a string (beginner/intermediate/advanced/expert/impossible) or a numeric ELO value, got %T", cmd.Difficulty)
+	if cmd.Difficulty != 0 {
+		applied, err := s.applyElo(cmd.Difficulty)
+		if err != nil {
+			return nil, err
 		}
+		return map[string]interface{}{"difficulty": applied}, nil
 	}
 	if cmd.Auto != nil {
 		s.autoEnabled.Store(*cmd.Auto)

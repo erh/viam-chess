@@ -1051,11 +1051,15 @@ async function cmdDirectMoveFromInputs() {
   (document.getElementById("move-to") as HTMLInputElement).value = "";
 }
 
-async function cmdSetDifficulty(value: string | number) {
+async function cmdSetDifficulty(elo: number) {
   try {
-    await doCommand({ difficulty: value });
-    const label = typeof value === "number" ? `ELO ${value}` : value;
-    pushEvent("go", `difficulty: ${label}`);
+    const res = await doCommand({ difficulty: elo });
+    const applied = typeof res.difficulty === "number" ? res.difficulty as number : elo;
+    if (applied !== elo) {
+      pushEvent("go", `difficulty: ELO ${elo} → clamped to ${applied}`);
+    } else {
+      pushEvent("go", `difficulty: ELO ${elo}`);
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     pushEvent("err", `difficulty: ${msg}`);
@@ -1192,15 +1196,6 @@ document.getElementById("auto-mode")!.addEventListener("change", async (e) => {
   }
 });
 document.getElementById("cam-toggle")!.addEventListener("click", toggleCamera);
-document.getElementById("difficulty-select")!.addEventListener("change", async (e) => {
-  const val = (e.target as HTMLSelectElement).value;
-  const eloInput = document.getElementById("difficulty-elo") as HTMLInputElement;
-  const btn = document.getElementById("btn-difficulty") as HTMLButtonElement;
-  const isCustom = val === "custom";
-  eloInput.classList.toggle("hidden", !isCustom);
-  btn.classList.toggle("hidden", !isCustom);
-  if (!isCustom) await cmdSetDifficulty(val);
-});
 document.getElementById("btn-difficulty")!.addEventListener("click", async () => {
   const elo = parseInt((document.getElementById("difficulty-elo") as HTMLInputElement).value, 10);
   if (!isNaN(elo)) await cmdSetDifficulty(elo);

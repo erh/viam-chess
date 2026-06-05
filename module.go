@@ -211,9 +211,9 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		return nil, err
 	}
 
-	if err := s.applyDifficulty(conf.initialDifficulty()); err != nil {
+	if _, err := s.applyElo(conf.initialElo()); err != nil {
 		s.cancelFunc()
-		return nil, fmt.Errorf("applying initial difficulty: %w", err)
+		return nil, fmt.Errorf("applying initial elo: %w", err)
 	}
 
 	return s, nil
@@ -221,9 +221,10 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 // applyElo sets the engine to target a specific Elo rating via UCI_LimitStrength.
 // The value is clamped to the engine's reported UCI_Elo min/max with a warning.
-func (s *viamChessChess) applyElo(elo int) error {
+// Returns the clamped ELO that was actually applied.
+func (s *viamChessChess) applyElo(elo int) (int, error) {
 	if s.engine == nil {
-		return nil
+		return elo, nil
 	}
 	if opt, ok := s.engine.Options()["UCI_Elo"]; ok {
 		if min, err := strconv.Atoi(opt.Min); err == nil && elo < min {
@@ -235,56 +236,11 @@ func (s *viamChessChess) applyElo(elo int) error {
 			elo = max
 		}
 	}
-	return s.engine.Run(
+	return elo, s.engine.Run(
 		uci.CmdSetOption{Name: "Skill Level", Value: "20"},
 		uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
 		uci.CmdSetOption{Name: "UCI_Elo", Value: fmt.Sprintf("%d", elo)},
 	)
-}
-
-// applyDifficulty sends the appropriate UCI setoption commands to the engine.
-// Valid difficulty values: "beginner", "intermediate", "advanced", "expert", "impossible".
-func (s *viamChessChess) applyDifficulty(difficulty string) error {
-	if s.engine == nil {
-		return nil
-	}
-	switch difficulty {
-	case "beginner":
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "false"},
-			uci.CmdSetOption{Name: "Skill Level", Value: "0"},
-		)
-	case "intermediate":
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "Skill Level", Value: "20"},
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
-			uci.CmdSetOption{Name: "UCI_Elo", Value: "1320"},
-		)
-	case "advanced":
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "Skill Level", Value: "20"},
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
-			uci.CmdSetOption{Name: "UCI_Elo", Value: "1800"},
-		)
-	case "expert":
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "Skill Level", Value: "20"},
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
-			uci.CmdSetOption{Name: "UCI_Elo", Value: "2400"},
-		)
-	case "impossible":
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "false"},
-			uci.CmdSetOption{Name: "Skill Level", Value: "20"},
-		)
-	default:
-		s.logger.Warnf("unknown difficulty %q (must be one of: beginner, intermediate, advanced, expert, impossible) — defaulting to intermediate", difficulty)
-		return s.engine.Run(
-			uci.CmdSetOption{Name: "Skill Level", Value: "20"},
-			uci.CmdSetOption{Name: "UCI_LimitStrength", Value: "true"},
-			uci.CmdSetOption{Name: "UCI_Elo", Value: "1320"},
-		)
-	}
 }
 
 func (s *viamChessChess) Name() resource.Name {

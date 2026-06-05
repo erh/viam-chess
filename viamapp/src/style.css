@@ -747,8 +747,6 @@ select.input {
   padding-right: 24px;
 }
 select.input option { background: var(--bg-2); color: var(--text-1); }
-.difficulty-select { min-width: 130px; }
-
 /* ── Kiosk mode ─────────────────────────────────────────────────────────────
    Default layout for touch / viewed-from-afar use. Opt out with ?compact=1
    for the dense desktop variant. */
@@ -820,4 +818,3 @@ select.input option { background: var(--bg-2); color: var(--text-1); }
 .app.kiosk .cam-toggle { padding: 14px 22px; }
 
 .app.kiosk .bottom-bar { padding: 14px 24px; gap: 16px; }
-.app.kiosk .difficulty-select { min-width: 150px; }
