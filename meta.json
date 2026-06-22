@@ -8,13 +8,13 @@
     {
       "api": "rdk:service:generic",
       "model": "erh:viam-chess:chess",
-      "short_description": "Provide a short (100 characters or less) description of this model here",
+      "short_description": "Plays physical chess: tracks the game, runs a chess engine, and drives an arm to move pieces.",
       "markdown_link": "README.md#chess-config"
     },
     {
       "api": "rdk:service:vision",
       "model": "erh:viam-chess:piece-finder",
-      "short_description": "debugging tool mostly i think",
+      "short_description": "Vision service that reads a board camera frame into the piece on each square.",
       "markdown_link": "README.md#piece-finder-config"
     }
 
