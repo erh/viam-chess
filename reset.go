@@ -188,6 +188,10 @@ func (s *viamChessChess) resetBoard(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+
+		if err := s.saveResetCheckpoint(ctx, theState); err != nil {
+			return fmt.Errorf("checkpoint after %s→%s: %w", fromStr, squareToString(to), err)
+		}
 	}
 
 	return s.wipe(ctx)
@@ -214,6 +218,10 @@ func (s *viamChessChess) restoreExtraQueens(ctx context.Context, all viscapture.
 		m := theState.board.SquareMap()
 		m[extraSq] = chess.NoPiece
 		theState.board = chess.NewBoard(m)
+
+		if err := s.saveResetCheckpoint(ctx, theState); err != nil {
+			return fmt.Errorf("checkpoint after restoring extra %v queen: %w", color, err)
+		}
 
 		sqStr := extraSq.String()
 		for _, o := range all.Objects {

@@ -100,6 +100,29 @@ func (s *viamChessChess) saveGame(ctx context.Context, theState *state) error {
 	return os.WriteFile(s.fenFile, b, 0666)
 }
 
+// saveResetCheckpoint persists a partial reset's board + graveyards to state.json
+// using only the FEN field. readState's legacy-FEN branch picks this up on the
+// next call, letting resetBoard resume — or letting normal play continue from
+// the partial-reset position. Move history (undo, threefold repetition, PGN)
+// is lost after the first checkpoint, but the position itself is fully playable.
+func (s *viamChessChess) saveResetCheckpoint(ctx context.Context, rs *resetState) error {
+	_, span := trace.StartSpan(ctx, "saveResetCheckpoint")
+	defer span.End()
+
+	// Full FEN needs 6 fields. Side-to-move/castling/ep/clocks are meaningless
+	// mid-reset; defaults are inert because resetBoard only reads Position().Board().
+	ss := savedState{
+		FEN:            rs.board.String() + " w KQkq - 0 1",
+		WhiteGraveyard: rs.whiteGraveyard,
+		BlackGraveyard: rs.blackGraveyard,
+	}
+	b, err := json.MarshalIndent(&ss, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.fenFile, b, 0666)
+}
+
 func (s *viamChessChess) wipe(ctx context.Context) error {
 	err := os.Remove(s.fenFile)
 	if errors.Is(err, os.ErrNotExist) {
