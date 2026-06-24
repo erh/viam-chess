@@ -74,16 +74,17 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 	grabZ := s.conf.grabZ()
 	grabZTall := s.conf.grabZTall()
 
+	var pieceBoard *chess.Board
+	if theState != nil {
+		pieceBoard = theState.game.Position().Board()
+	} else if board != nil {
+		pieceBoard = board
+	}
+
 	pickupZ := grabZ
 	if pickupZOverride > 0 {
 		pickupZ = pickupZOverride
 	} else {
-		var pieceBoard *chess.Board
-		if theState != nil {
-			pieceBoard = theState.game.Position().Board()
-		} else if board != nil {
-			pieceBoard = board
-		}
 		if pieceBoard != nil && len(from) == 2 {
 			sq := chess.NewSquare(chess.File(from[0]-'a'), chess.Rank(from[1]-'1'))
 			pt := pieceBoard.Piece(sq).Type()
@@ -120,7 +121,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 				return false, err
 			}
 			time.Sleep(500 * time.Millisecond)
-			if err := s.moveGripper(ctx, pos); err != nil {
+			if err := s.moveGripperWithTheta(ctx, pos, pickupThetaFor(pieceBoard, from)); err != nil {
 				return false, err
 			}
 			return s.myGrab(ctx)
@@ -201,7 +202,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 			return err
 		}
 
-		err = s.moveGripper(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: pickupZ})
+		err = s.moveGripperWithTheta(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: pickupZ}, pickupThetaFor(pieceBoard, to))
 		if err != nil {
 			return err
 		}
@@ -251,13 +252,45 @@ func (s *viamChessChess) setupGripper(ctx context.Context) error {
 	return err
 }
 
+// pickupThetaOffset is added to the wrist (6th joint) Theta when descending to
+// grab or place a piece. The gripper points straight down (OZ:-1), so Theta
+// spins the final joint about vertical.
+const pickupThetaOffset = 25
+
+// pickupThetaFor returns pickupThetaOffset only when sq is in the highest four
+// ranks (5-8) AND an adjacent-file square on the same rank holds a tall piece
+// (King or Queen) that the wrist must spin to clear. Nearer ranks, non-board
+// targets (graveyard "-", "X..." slots), and a nil board all use 0.
+func pickupThetaFor(board *chess.Board, sq string) float64 {
+	if len(sq) != 2 || sq[1] < '5' || sq[1] > '8' || board == nil {
+		return 0
+	}
+	file := int(sq[0] - 'a')
+	rank := chess.Rank(sq[1] - '1')
+	for _, df := range []int{-1, 1} {
+		f := file + df
+		if f < 0 || f > 7 {
+			continue
+		}
+		pt := board.Piece(chess.NewSquare(chess.File(f), rank)).Type()
+		if pt == chess.King || pt == chess.Queen {
+			return pickupThetaOffset
+		}
+	}
+	return 0
+}
+
 func (s *viamChessChess) moveGripper(ctx context.Context, p r3.Vector) error {
+	return s.moveGripperWithTheta(ctx, p, 0)
+}
+
+func (s *viamChessChess) moveGripperWithTheta(ctx context.Context, p r3.Vector, thetaOffset float64) error {
 	ctx, span := trace.StartSpan(ctx, "moveGripper")
 	defer span.End()
 
 	orientation := &spatialmath.OrientationVectorDegrees{
 		OZ:    -1,
-		Theta: s.startPose.Pose().Orientation().OrientationVectorDegrees().Theta - 180,
+		Theta: s.startPose.Pose().Orientation().OrientationVectorDegrees().Theta - 180 + thetaOffset,
 	}
 
 	if p.X > 300 {
