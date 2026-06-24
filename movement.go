@@ -254,8 +254,7 @@ func (s *viamChessChess) setupGripper(ctx context.Context) error {
 
 // pickupThetaOffset is added to the wrist (6th joint) Theta when descending to
 // grab or place a piece. The gripper points straight down (OZ:-1), so Theta
-// spins the final joint about vertical. 1/8 turn would be 45deg; using 25deg for
-// now until the wrist orientation relative to the camera cable is pinned down.
+// spins the final joint about vertical.
 const pickupThetaOffset = 25
 
 // pickupThetaFor returns pickupThetaOffset only when sq is in the highest four
