@@ -31,8 +31,7 @@ type cmdStruct struct {
 	BoardSnapshot   bool   `mapstructure:"board-snapshot"`
 	GameEvents      bool   `mapstructure:"game-events"`
 	CompanionConfig bool   `mapstructure:"companion-config"`
-	Auto            *bool    // pointer so explicit false is distinguishable from absent
-	SetAnnounce     *bool    `mapstructure:"set-announce"` // pointer so explicit false is distinguishable from absent
+	SetAnnounce     *bool  `mapstructure:"set-announce"` // pointer so explicit false is distinguishable from absent
 }
 
 func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interface{}) (map[string]interface{}, error) {
@@ -44,6 +43,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 	// The board loop holds doCommandLock during makeAMove, so without this early
 	// return polling clients would see stale state for the entire arm movement.
 	if bs, _ := cmdMap["board-snapshot"].(bool); bs {
+		mode, auto, gameOver := s.modeFields()
 		s.boardCache.mu.RLock()
 		if s.boardCache.ready {
 			result := map[string]interface{}{
@@ -51,7 +51,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"camera_board":    s.boardCache.cameraBoard,
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
-				"auto":            s.autoEnabled.Load(),
+				"auto":            auto,
+				"mode":            mode,
+				"game_over":       gameOver,
+				"needs_fix":       s.boardCache.needsFix,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -66,6 +69,24 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			return result, nil
 		}
 		s.boardCache.mu.RUnlock()
+	}
+
+	// mode / auto fast path: changing the mode is lock-free (§10.3), so a pause
+	// acks instantly even while the board loop holds doCommandLock for an
+	// in-flight arm move. Handled before Decode (numbers arrive as float64).
+	if raw, ok := cmdMap["mode"]; ok {
+		to, err := toModeInt(raw)
+		if err != nil {
+			return nil, err
+		}
+		return s.setMode(ctx, Mode(to))
+	}
+	if raw, ok := cmdMap["auto"]; ok {
+		on, ok := raw.(bool)
+		if !ok {
+			return nil, fmt.Errorf("auto must be a bool, got %T", raw)
+		}
+		return s.applyAutoShim(ctx, on)
 	}
 
 	s.doCommandLock.Lock()
@@ -94,16 +115,13 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		}
 		return map[string]interface{}{"difficulty": applied}, nil
 	}
-	if cmd.Auto != nil {
-		s.autoEnabled.Store(*cmd.Auto)
-		return map[string]interface{}{"auto": *cmd.Auto}, nil
-	}
 	if cmd.SetAnnounce != nil {
 		s.announceEnabled.Store(*cmd.SetAnnounce)
 		s.logger.Infof("announce set to %v", *cmd.SetAnnounce)
 		return map[string]interface{}{"announce": *cmd.SetAnnounce}, nil
 	}
 	if cmd.BoardSnapshot {
+		mode, auto, gameOver := s.modeFields()
 		// Fast path: read the loop-populated cache; no per-call capture.
 		s.boardCache.mu.RLock()
 		if s.boardCache.ready {
@@ -112,7 +130,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"camera_board":    s.boardCache.cameraBoard,
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
-				"auto":            s.autoEnabled.Load(),
+				"auto":            auto,
+				"mode":            mode,
+				"game_over":       gameOver,
+				"needs_fix":       s.boardCache.needsFix,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
 				"event":           s.boardCache.gameEvents.Event,
 				"outcome":         s.boardCache.gameEvents.Outcome,
@@ -144,7 +165,10 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			"camera_board":    cameraBoard,
 			"white_graveyard": whiteGY,
 			"black_graveyard": blackGY,
-			"auto":            s.autoEnabled.Load(),
+			"auto":            auto,
+			"mode":            mode,
+			"game_over":       gameOver,
+			"needs_fix":       s.getNeedsFix(),
 			"captured_at_ms":  time.Now().UnixMilli(),
 			"event":           events.Event,
 			"outcome":         events.Outcome,
@@ -233,7 +257,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		for x := range cmd.Move.N {
 			err := s.goToStart(ctx)
 			if err != nil {
-				return nil, err
+				return nil, s.manualErr(err)
 			}
 
 			from, to := cmd.Move.From, cmd.Move.To
@@ -242,12 +266,12 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			}
 			all, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil)
 			if err != nil {
-				return nil, err
+				return nil, s.manualErr(err)
 			}
 
 			err = s.movePiece(ctx, all, nil, from, to, nil, nil)
 			if err != nil {
-				return nil, err
+				return nil, s.manualErr(err)
 			}
 		}
 
@@ -263,26 +287,123 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			videoTags = append(videoTags, "move="+m.String())
 		}
 		if err != nil {
-			return nil, err
+			return nil, s.manualErr(err)
 		}
 		last := moves[len(moves)-1]
 		return map[string]interface{}{"move": last.String()}, nil
 	}
 
 	if cmd.Undo > 0 {
-		err = s.undoMoves(ctx, cmd.Undo)
-		return nil, err
+		return nil, s.manualErr(s.undoMoves(ctx, cmd.Undo))
 	}
 
 	if cmd.Reset {
-		return nil, s.resetBoard(ctx)
+		// Physical board reset (arm rearranges pieces) is the existing {reset:true}.
+		// Never run it from ERROR — the arm may be unsafe (§6.4). The state-machine
+		// reset is the separate {mode:0}.
+		if s.mode.current() == ModeError {
+			return nil, fmt.Errorf("physical reset is disabled in ERROR mode (arm may be unsafe); use {\"mode\":0} to reset state, or recover first")
+		}
+		return nil, s.manualErr(s.resetBoard(ctx))
 	}
 
 	if cmd.PlayFEN != "" {
-		return nil, s.playFENFile(ctx, cmd.PlayFEN)
+		return nil, s.manualErr(s.playFENFile(ctx, cmd.PlayFEN))
 	}
 
 	return nil, fmt.Errorf("bad cmd %v", cmdMap)
+}
+
+// setMode applies the {"mode":N} command: a target-based transition validated
+// against the table. Lock-free (§10.3) — it never takes doCommandLock, so a
+// pause acks instantly while any in-flight arm motion finishes; the physical
+// effect lands on the next tick.
+func (s *viamChessChess) setMode(ctx context.Context, to Mode) (map[string]interface{}, error) {
+	// Resuming from ERROR requires the saved game to be intact (§6.3).
+	if s.mode.current() == ModeError && to != ModeStart {
+		if _, err := s.getGame(ctx); err != nil {
+			return nil, fmt.Errorf("cannot resume from ERROR: game state not intact: %w", err)
+		}
+	}
+	from, err := s.mode.transition(to)
+	if err != nil {
+		return nil, err
+	}
+	// START -> active begins a fresh game. Safe to wipe inline: START has no
+	// concurrent state writer, which also closes the boot-leftover race (§10.3).
+	if from == ModeStart && (to == ModeVsHuman || to == ModeVsSelf) {
+		if err := s.ensureNoGame(); err != nil {
+			s.logger.Warnf("setMode %v->%v: ensureNoGame failed: %v", from, to, err)
+		}
+	}
+	s.logger.Infof("mode %v -> %v", from, to)
+	return map[string]interface{}{"mode": int(to)}, nil
+}
+
+// applyAutoShim maps the legacy {"auto":bool} command (still sent by the
+// companion UI) onto mode transitions, so the unmodified UI keeps working (§10.6).
+func (s *viamChessChess) applyAutoShim(ctx context.Context, on bool) (map[string]interface{}, error) {
+	cur := s.mode.current()
+	if on {
+		switch cur {
+		case ModeVsHuman:
+			// already playing as black — no-op
+		case ModeStart, ModeIdle:
+			// start (from START) or resume (from IDLE when origin was VS_HUMAN)
+			if _, err := s.setMode(ctx, ModeVsHuman); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("auto:true not valid from %v", cur)
+		}
+	} else if cur == ModeVsHuman {
+		if _, err := s.setMode(ctx, ModeIdle); err != nil {
+			return nil, err
+		}
+	}
+	// auto:false from a non-playing mode is a no-op.
+	return map[string]interface{}{"auto": s.mode.current() == ModeVsHuman}, nil
+}
+
+// modeFields returns the mode-derived snapshot fields. auto = (mode==VS_HUMAN)
+// is kept for backward compatibility alongside the new mode int.
+func (s *viamChessChess) modeFields() (mode int, auto, gameOver bool) {
+	ms := s.mode.snapshot()
+	return int(ms.Mode), ms.Mode == ModeVsHuman, ms.GameOver
+}
+
+// getNeedsFix reads the needs_fix flag under the cache lock.
+func (s *viamChessChess) getNeedsFix() bool {
+	s.boardCache.mu.RLock()
+	defer s.boardCache.mu.RUnlock()
+	return s.boardCache.needsFix
+}
+
+// manualErr enters ERROR (the post-command defer homes the arm) when a manual
+// gameplay command hit an execution fault; other errors pass through unchanged.
+func (s *viamChessChess) manualErr(err error) error {
+	if err != nil && isExecFailure(err) {
+		s.logger.Errorf("manual command execution failure, entering ERROR: %v", err)
+		s.mode.enterError()
+	}
+	return err
+}
+
+// toModeInt coerces a DoCommand "mode" value to an int. Numbers arrive as
+// float64 over gRPC.
+func toModeInt(raw interface{}) (int, error) {
+	switch v := raw.(type) {
+	case float64:
+		return int(v), nil
+	case float32:
+		return int(v), nil
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("mode must be a number, got %T", raw)
+	}
 }
 
 const videoSaverTimeFormat = "2006-01-02_15-04-05"

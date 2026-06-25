@@ -77,9 +77,10 @@ type viamChessChess struct {
 	squareXY   map[string]r3.Vector
 	squareXYMu sync.RWMutex
 
-	// autoEnabled gates the engine reply in the board loop; detection + cache
-	// refresh always run.
-	autoEnabled atomic.Bool
+	// mode is the single source of truth for behavior. The board loop dispatches
+	// on it each tick; DoCommand changes it via a validated transition table.
+	// Zero value = START (no game). See mode.go / STATE_MACHINE_SPEC.md.
+	mode modeMachine
 
 	// announceEnabled gates the on_move_target dispatch. Default true.
 	announceEnabled atomic.Bool
@@ -108,6 +109,11 @@ type viamChessChess struct {
 		blackGraveyard []interface{}
 		capturedAt     time.Time
 		gameEvents     GameEventsResult
+		// needsFix is set by the VS_HUMAN tick when the detected board can't be
+		// mapped to a legal move (illegal/scrambled or a transient capture
+		// hiccup); cleared on the next clean detection. Surfaced as needs_fix so
+		// the companion app can prompt the human. Not an ERROR (see §7.4).
+		needsFix bool
 	}
 }
 

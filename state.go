@@ -108,3 +108,15 @@ func (s *viamChessChess) wipe(ctx context.Context) error {
 	}
 	return err
 }
+
+// ensureNoGame removes the saved game if present, quietly. It is the idempotent
+// "no game in START" enforcer the loop runs each START tick (and the START ->
+// active transition runs inline), so START always means no game. Unlike wipe it
+// does not warn on a missing file, since absence is the normal case.
+func (s *viamChessChess) ensureNoGame() error {
+	err := os.Remove(s.fenFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
