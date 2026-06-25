@@ -591,6 +591,7 @@ func (s *viamChessChess) boardTick(ctx context.Context) {
 	// Read the mode once at tick start. A lock-free mode change mid-tick takes
 	// effect on the NEXT tick; the in-flight arm motion below finishes first (§6.1).
 	mode := s.mode.current()
+	s.logger.Debugf("boardTick: mode=%v", mode) // per-tick; transitions log at Info
 
 	// ERROR halts the loop: do nothing until resume/reset (§6.3). Returning
 	// before taking doCommandLock keeps manual recovery commands responsive.
@@ -625,7 +626,7 @@ func (s *viamChessChess) boardTick(ctx context.Context) {
 	switch mode {
 	case ModeStart, ModeIdle, ModeTeaching:
 		// Passive: refresh the live snapshot only; never move a piece (§5).
-		s.setNeedsFix(false)
+		s.setNeedsFix(false, "")
 		if err := s.refreshBoardCache(ctx, all); err != nil {
 			s.logger.Warnf("boardTick: cache refresh failed: %v", err)
 		}
@@ -644,10 +645,9 @@ func (s *viamChessChess) tickVsHuman(ctx context.Context, all viscapture.VisCapt
 	// needs_fix and wait for a human — never ERROR (§7.4).
 	m, err := s.checkPositionForMoves(ctx, all)
 	if err != nil {
-		s.logger.Warnf("VS_HUMAN: detection failed (needs fix): %v", err)
-		s.setNeedsFix(true)
+		s.setNeedsFix(true, err.Error())
 	} else {
-		s.setNeedsFix(false)
+		s.setNeedsFix(false, "")
 		if m != nil {
 			s.logger.Infof("VS_HUMAN: detected human move %s -> %s", m.S1().String(), m.S2().String())
 		}
@@ -690,22 +690,38 @@ func (s *viamChessChess) tickVsHuman(ctx context.Context, all viscapture.VisCapt
 // tickVsSelf plays one blind ply per tick, alternating colors. No per-move
 // vision verification — it trusts the arm (§7.3).
 func (s *viamChessChess) tickVsSelf(ctx context.Context, all viscapture.VisCapture) {
-	s.setNeedsFix(false)
-
 	if err := s.refreshBoardCache(ctx, all); err != nil {
 		s.logger.Warnf("boardTick: cache refresh failed: %v", err)
 	}
 
 	// Defensive: if the game already ended, park — no auto-restart (§7.3).
 	if s.checkGameOver(ctx) {
+		s.setNeedsFix(false, "")
 		return
 	}
 
-	// One ply for whichever side is to move (turn is implicit in makeAMove).
-	if _, err := s.makeAMove(ctx, false); err != nil {
+	theState, err := s.getGame(ctx)
+	if err != nil {
+		s.logger.Warnf("VS_SELF: getGame failed: %v", err)
+		return
+	}
+	// Verify the board only on the first ply of the game, reusing makeAMove's
+	// existing sanity check exactly as cmd.Go does for its first move. After that,
+	// self-play is blind and trusts the arm (§7.3).
+	firstPly := len(theState.game.Moves()) == 0
+
+	if _, err := s.makeAMove(ctx, firstPly); err != nil {
+		// On the first ply a non-exec error means the board isn't set up at the
+		// starting position yet — wait and prompt (needs_fix), don't fault.
+		if firstPly && !isExecFailure(err) {
+			s.setNeedsFix(true, err.Error())
+			return
+		}
 		s.handleMoveErr(ctx, "VS_SELF move", err)
 		return
 	}
+	s.setNeedsFix(false, "")
+
 	if all2, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil); err == nil {
 		_ = s.refreshBoardCache(ctx, all2)
 	}
@@ -749,9 +765,19 @@ func (s *viamChessChess) checkGameOver(ctx context.Context) bool {
 }
 
 // setNeedsFix records whether the human board currently can't be resolved to a
-// legal move; surfaced as needs_fix in the snapshot.
-func (s *viamChessChess) setNeedsFix(v bool) {
+// legal move; surfaced as needs_fix in the snapshot. Logs only on a state change
+// so a persistently-bad (or persistently-fine) board doesn't spam the loop.
+func (s *viamChessChess) setNeedsFix(v bool, reason string) {
 	s.boardCache.mu.Lock()
+	changed := s.boardCache.needsFix != v
 	s.boardCache.needsFix = v
 	s.boardCache.mu.Unlock()
+	if !changed {
+		return
+	}
+	if v {
+		s.logger.Warnf("needs_fix SET: board does not match the game state — waiting for a human to fix the board (%s)", reason)
+	} else {
+		s.logger.Infof("needs_fix CLEARED: board matches the game state again")
+	}
 }

@@ -335,6 +335,7 @@ func (s *viamChessChess) setMode(ctx context.Context, to Mode) (map[string]inter
 		if err := s.ensureNoGame(); err != nil {
 			s.logger.Warnf("setMode %v->%v: ensureNoGame failed: %v", from, to, err)
 		}
+		s.logger.Infof("starting %v on a fresh game — assuming the physical board is set up at the starting position", to)
 	}
 	s.logger.Infof("mode %v -> %v", from, to)
 	return map[string]interface{}{"mode": int(to)}, nil

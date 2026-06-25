@@ -147,7 +147,8 @@ There is **one background loop**. Each tick, behavior is dispatched by the curre
 
 ### 7.3 VS_SELF(3)
 - Robot plays both sides, **one ply per loop tick**, alternating colors.
-- **Blind**: it does not verify the board against expected state; it trusts the arm. (Only VS_HUMAN waits on an illegal board.)
+- **Blind per move**: it does not verify the board after each ply; it trusts the arm. (Only VS_HUMAN waits on an illegal board mid-game.)
+- **First ply is verified.** Reusing `makeAMove`'s existing sanity check (the same one `cmd.Go` runs on its first move), the first ply of the game checks the board is the starting position; if not, it surfaces `needs_fix` and waits rather than playing into a wrong board. This is the only verification VS_SELF does.
 - **Cadence is configurable** (think-time / tick interval).
 - Plays **one** full game; on game-over → IDLE(1) (finished). **No auto-restart** — a human resets for the next game.
 
@@ -223,7 +224,7 @@ type modeMachine struct {
 - **START** → `ensureNoGame` (idempotent remove); home; capture; refresh.
 - **IDLE / TEACHING** → home; capture; refresh. No detect / reply / move.
 - **VS_HUMAN** → home; capture; refresh; detect (non-exec err → `needs_fix`, cleared on next clean detection); **game-over check before reply** (a human-delivered mate must not trigger a doomed `makeAMove`); reply on black's turn (`isExecFailure` → `enterError` + home); post-reply game-over check.
-- **VS_SELF** → home; capture; refresh; `makeAMove(false)` blind (`isExecFailure` → `enterError` + home); post-move game-over check. Cadence reuses `board-loop-interval-ms` (tick) + `engine-millis` (think); turn alternation is implicit in `makeAMove`.
+- **VS_SELF** → home; capture; refresh; `makeAMove(firstPly)` — the first ply of the game is sanity-checked (board must be the start position, else `needs_fix` and wait), every ply after is blind (`isExecFailure` → `enterError` + home); post-move game-over check. Cadence reuses `board-loop-interval-ms` (tick) + `engine-millis` (think); turn alternation is implicit in `makeAMove`.
 - Game-over in {2,3} → `enterIdle(gameOver=true)`.
 
 ### 10.6 `auto` compat shim & the two resets
