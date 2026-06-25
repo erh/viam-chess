@@ -517,6 +517,8 @@ func (s *viamChessChess) checkPositionForMoves(ctx context.Context, all viscaptu
 				return nil, err
 			}
 
+			s.announceMove(m.String(), theState.game.FEN(), "human")
+
 			return &m, nil
 		}
 	}
