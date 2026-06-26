@@ -79,7 +79,7 @@ type viamChessChess struct {
 
 	// mode is the single source of truth for behavior. The board loop dispatches
 	// on it each tick; DoCommand changes it via a validated transition table.
-	// Zero value = START (no game). See mode.go / STATE_MACHINE_SPEC.md.
+	// Zero value = START (no game). See mode.go.
 	mode modeMachine
 
 	// announceEnabled gates the on_move_target dispatch. Default true.

@@ -7,8 +7,8 @@ import (
 )
 
 // Mode is the robot's single source of truth for behavior. At any moment the
-// machine is in exactly one mode; see STATE_MACHINE_SPEC.md for the authoritative
-// design and transition table.
+// machine is in exactly one mode; the transition table in this file is the
+// authoritative design.
 type Mode int
 
 const (
