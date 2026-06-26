@@ -309,12 +309,16 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 
 	if cmd.Reset {
 		// Physical board reset (arm rearranges pieces) is the existing {reset:true}.
-		// Never run it from ERROR — the arm may be unsafe (§6.4). The state-machine
-		// reset is the separate {mode:0}.
+		// Never run it from ERROR — the arm may be unsafe (§6.4). On success,
+		// land in START(0); use {mode:0} for a software-only reset.
 		if s.mode.current() == ModeError {
 			return nil, fmt.Errorf("physical reset is disabled in ERROR mode (arm may be unsafe); use {\"mode\":0} to reset state, or recover first")
 		}
-		return s.withMode(nil), s.manualErr(s.resetBoard(ctx))
+		if err := s.manualErr(s.resetBoard(ctx)); err != nil {
+			return s.withMode(nil), err
+		}
+		s.mode.enterStart()
+		return s.withMode(nil), nil
 	}
 
 	if cmd.PlayFEN != "" {

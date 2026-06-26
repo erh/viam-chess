@@ -165,3 +165,14 @@ func TestEnterErrorIdempotent(t *testing.T) {
 		t.Fatalf("errPrevMode overwritten by repeat fault: %+v", got)
 	}
 }
+
+func TestEnterStart(t *testing.T) {
+	mm := &modeMachine{mode: ModeVsHuman, gameOver: true}
+	mm.enterStart()
+	if mm.current() != ModeStart {
+		t.Fatalf("mode %v, want START", mm.current())
+	}
+	if mm.snapshot().GameOver {
+		t.Fatal("gameOver should be cleared")
+	}
+}
