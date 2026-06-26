@@ -43,7 +43,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 	// The board loop holds doCommandLock during makeAMove, so without this early
 	// return polling clients would see stale state for the entire arm movement.
 	if bs, _ := cmdMap["board-snapshot"].(bool); bs {
-		mode, auto, gameOver := s.modeFields()
+		_, auto, gameOver := s.modeFields()
 		s.boardCache.mu.RLock()
 		if s.boardCache.ready {
 			result := map[string]interface{}{
@@ -52,7 +52,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            auto,
-				"mode":            mode,
 				"game_over":       gameOver,
 				"needs_fix":       s.boardCache.needsFix,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
@@ -66,7 +65,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"score_mate":      s.boardCache.gameEvents.ScoreMate,
 			}
 			s.boardCache.mu.RUnlock()
-			return result, nil
+			return s.withMode(result), nil
 		}
 		s.boardCache.mu.RUnlock()
 	}
@@ -115,26 +114,26 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		s.clearSquareCache()
 		err := s.wipe(ctx)
 		s.invalidateBoardCache()
-		return nil, err
+		return s.withMode(nil), err
 	}
 	if cmd.ClearCache {
 		s.clearSquareCache()
-		return nil, nil
+		return s.withMode(nil), nil
 	}
 	if cmd.Difficulty != 0 {
 		applied, err := s.applyElo(cmd.Difficulty)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"difficulty": applied}, nil
+		return s.withMode(map[string]interface{}{"difficulty": applied}), nil
 	}
 	if cmd.SetAnnounce != nil {
 		s.announceEnabled.Store(*cmd.SetAnnounce)
 		s.logger.Infof("announce set to %v", *cmd.SetAnnounce)
-		return map[string]interface{}{"announce": *cmd.SetAnnounce}, nil
+		return s.withMode(map[string]interface{}{"announce": *cmd.SetAnnounce}), nil
 	}
 	if cmd.BoardSnapshot {
-		mode, auto, gameOver := s.modeFields()
+		_, auto, gameOver := s.modeFields()
 		// Fast path: read the loop-populated cache; no per-call capture.
 		s.boardCache.mu.RLock()
 		if s.boardCache.ready {
@@ -144,7 +143,6 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"white_graveyard": s.boardCache.whiteGraveyard,
 				"black_graveyard": s.boardCache.blackGraveyard,
 				"auto":            auto,
-				"mode":            mode,
 				"game_over":       gameOver,
 				"needs_fix":       s.boardCache.needsFix,
 				"captured_at_ms":  s.boardCache.capturedAt.UnixMilli(),
@@ -158,7 +156,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 				"score_mate":      s.boardCache.gameEvents.ScoreMate,
 			}
 			s.boardCache.mu.RUnlock()
-			return result, nil
+			return s.withMode(result), nil
 		}
 		s.boardCache.mu.RUnlock()
 		// Cache empty (loop disabled or pre-first-tick) — capture inline.
@@ -173,13 +171,12 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		events.ScoreCP = int(s.lastScoreCP.Load())
 		events.ScoreMate = int(s.lastScoreMate.Load())
 		_ = s.refreshBoardCache(ctx, all)
-		return map[string]interface{}{
+		return s.withMode(map[string]interface{}{
 			"fen":             fen,
 			"camera_board":    cameraBoard,
 			"white_graveyard": whiteGY,
 			"black_graveyard": blackGY,
 			"auto":            auto,
-			"mode":            mode,
 			"game_over":       gameOver,
 			"needs_fix":       s.getNeedsFix(),
 			"captured_at_ms":  time.Now().UnixMilli(),
@@ -191,7 +188,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			"is_over":         events.IsOver,
 			"score_cp":        events.ScoreCP,
 			"score_mate":      events.ScoreMate,
-		}, nil
+		}), nil
 	}
 
 	if cmd.GameEvents {
@@ -202,16 +199,16 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		result := gameEventsResult(theState.game)
 		result.ScoreCP = int(s.lastScoreCP.Load())
 		result.ScoreMate = int(s.lastScoreMate.Load())
-		return result.Map(), nil
+		return s.withMode(result.Map()), nil
 	}
 
 	if cmd.CompanionConfig {
-		return map[string]interface{}{
+		return s.withMode(map[string]interface{}{
 			"bad_state_delay_ms":    s.conf.companionBadStateDelayMs(),
 			"welcome_revive_ms":     s.conf.companionWelcomeReviveMs(),
 			"in_check_dismiss_ms":   s.conf.companionInCheckDismissMs(),
 			"first_move_dismiss_ms": s.conf.companionFirstMoveDismissMs(),
-		}, nil
+		}), nil
 	}
 
 	if cmd.Hover != "" {
@@ -241,7 +238,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			return nil, err
 		}
 
-		return map[string]interface{}{"center": center}, nil
+		return s.withMode(map[string]interface{}{"center": center}), nil
 	}
 
 	var videoFrom *time.Time
@@ -288,7 +285,7 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			}
 		}
 
-		return nil, nil
+		return s.withMode(nil), nil
 	}
 
 	if cmd.Go > 0 {
@@ -303,25 +300,29 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 			return nil, s.manualErr(err)
 		}
 		last := moves[len(moves)-1]
-		return map[string]interface{}{"move": last.String()}, nil
+		return s.withMode(map[string]interface{}{"move": last.String()}), nil
 	}
 
 	if cmd.Undo > 0 {
-		return nil, s.manualErr(s.undoMoves(ctx, cmd.Undo))
+		return s.withMode(nil), s.manualErr(s.undoMoves(ctx, cmd.Undo))
 	}
 
 	if cmd.Reset {
 		// Physical board reset (arm rearranges pieces) is the existing {reset:true}.
-		// Never run it from ERROR — the arm may be unsafe (§6.4). The state-machine
-		// reset is the separate {mode:0}.
+		// Never run it from ERROR — the arm may be unsafe (§6.4). On success,
+		// land in START(0); use {mode:0} for a software-only reset.
 		if s.mode.current() == ModeError {
 			return nil, fmt.Errorf("physical reset is disabled in ERROR mode (arm may be unsafe); use {\"mode\":0} to reset state, or recover first")
 		}
-		return nil, s.manualErr(s.resetBoard(ctx))
+		if err := s.manualErr(s.resetBoard(ctx)); err != nil {
+			return s.withMode(nil), err
+		}
+		s.mode.enterStart()
+		return s.withMode(nil), nil
 	}
 
 	if cmd.PlayFEN != "" {
-		return nil, s.manualErr(s.playFENFile(ctx, cmd.PlayFEN))
+		return s.withMode(nil), s.manualErr(s.playFENFile(ctx, cmd.PlayFEN))
 	}
 
 	return nil, fmt.Errorf("bad cmd %v", cmdMap)
@@ -351,7 +352,7 @@ func (s *viamChessChess) setMode(ctx context.Context, to Mode) (map[string]inter
 		s.logger.Infof("starting %v on a fresh game — assuming the physical board is set up at the starting position", to)
 	}
 	s.logger.Infof("mode %v -> %v", from, to)
-	return map[string]interface{}{"mode": int(to)}, nil
+	return s.withMode(nil), nil
 }
 
 // applyAutoShim maps the legacy {"auto":bool} command (still sent by the
@@ -376,7 +377,7 @@ func (s *viamChessChess) applyAutoShim(ctx context.Context, on bool) (map[string
 		}
 	}
 	// auto:false from a non-playing mode is a no-op.
-	return map[string]interface{}{"auto": s.mode.current() == ModeVsHuman}, nil
+	return s.withMode(map[string]interface{}{"auto": s.mode.current() == ModeVsHuman}), nil
 }
 
 // modeFields returns the mode-derived snapshot fields. auto = (mode==VS_HUMAN)
@@ -384,6 +385,16 @@ func (s *viamChessChess) applyAutoShim(ctx context.Context, on bool) (map[string
 func (s *viamChessChess) modeFields() (mode int, auto, gameOver bool) {
 	ms := s.mode.snapshot()
 	return int(ms.Mode), ms.Mode == ModeVsHuman, ms.GameOver
+}
+
+// withMode adds the current mode (0-5) to every DoCommand success payload.
+func (s *viamChessChess) withMode(result map[string]interface{}) map[string]interface{} {
+	mode := int(s.mode.current())
+	if result == nil {
+		return map[string]interface{}{"mode": mode}
+	}
+	result["mode"] = mode
+	return result
 }
 
 // getNeedsFix reads the needs_fix flag under the cache lock.

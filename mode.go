@@ -171,6 +171,16 @@ func (mm *modeMachine) enterIdle(gameOver bool) {
 	}
 }
 
+// enterStart parks in START after a physical board reset. Unlike transition,
+// this is allowed from any non-ERROR mode because rearranging pieces ends the
+// active game.
+func (mm *modeMachine) enterStart() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.mode = ModeStart
+	mm.gameOver = false
+}
+
 // enterError records the current mode and halts into ERROR. Called on any
 // execution failure (see isExecFailure). Idempotent.
 func (mm *modeMachine) enterError() {
