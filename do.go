@@ -88,6 +88,19 @@ func (s *viamChessChess) DoCommand(ctx context.Context, cmdMap map[string]interf
 		}
 		return s.applyAutoShim(ctx, on)
 	}
+	// mode-status: lock-free read of the full machine state, for tests/clients
+	// that want just the mode without the board snapshot.
+	if q, _ := cmdMap["mode-status"].(bool); q {
+		snap := s.mode.snapshot()
+		return map[string]interface{}{
+			"mode":          int(snap.Mode),
+			"mode_name":     snap.Mode.String(),
+			"idle_origin":   int(snap.IdleOrigin),
+			"err_prev_mode": int(snap.ErrPrev),
+			"game_over":     snap.GameOver,
+			"needs_fix":     s.getNeedsFix(),
+		}, nil
+	}
 
 	s.doCommandLock.Lock()
 	defer s.doCommandLock.Unlock()

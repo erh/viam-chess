@@ -191,7 +191,7 @@ The fresh session should **not** rebuild these — they already exist and the st
 These were design choices left open in the original spec. Resolved during the implementation grilling on 2026-06-24; recorded here as the authoritative implementation contract.
 
 ### 10.1 Settled choices (from the original open questions)
-- **`mode` replaces `autoEnabled`.** The `autoEnabled atomic.Bool` is deleted; the mode machine is the single source of truth. The snapshot keeps emitting `auto` (= `mode == VS_HUMAN`) **and** gains a new `mode` int, plus `game_over` and `needs_fix` bools. The `viamapp` UI is **not** modified — see the `auto` shim (§10.6).
+- **`mode` replaces `autoEnabled`.** The `autoEnabled atomic.Bool` is deleted; the mode machine is the single source of truth. The snapshot keeps emitting `auto` (= `mode == VS_HUMAN`) **and** gains a new `mode` int, plus `game_over` and `needs_fix` bools. The `viamapp` UI is **not** modified — see the `auto` shim (§10.6). A dedicated lock-free `{"mode-status": true}` query returns just the machine state (`mode`, `mode_name`, `idle_origin`, `err_prev_mode`, `game_over`, `needs_fix`) for tests/clients.
 - **START/IDLE/TEACHING loop behavior.** Keep ticking to refresh the snapshot (capture + home), but gate out detection / reply / piece-movement. "Never move" = never moves a *piece*; arm homing between ticks is allowed.
 - **Debounce strength.** The existing recapture-on-noise + mid-castle deferral is sufficient. No "stable for K ticks" rule unless real misfires appear.
 
