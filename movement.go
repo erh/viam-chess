@@ -139,7 +139,7 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 			}
 		}
 		if !got {
-			return fmt.Errorf("couldn't grab piece at %s after 2 attempts", from)
+			return errExec(fmt.Errorf("couldn't grab piece at %s after 2 attempts", from))
 		}
 
 		err = s.moveGripper(ctx, r3.Vector{X: xy.X, Y: xy.Y, Z: safeZ})
@@ -227,18 +227,18 @@ func (s *viamChessChess) goToStart(ctx context.Context) error {
 
 	err := s.poseStart.SetPosition(ctx, 2, nil)
 	if err != nil {
-		return err
+		return errExec(err)
 	}
 	err = s.gripper.Open(ctx, nil)
 	if err != nil {
-		return err
+		return errExec(err)
 	}
 
 	time.Sleep(time.Millisecond * 250)
 
 	s.startPose, err = s.rfs.GetPose(ctx, s.conf.Gripper, "world", nil, nil)
 	if err != nil {
-		return err
+		return errExec(err)
 	}
 
 	return nil
@@ -249,7 +249,7 @@ func (s *viamChessChess) setupGripper(ctx context.Context) error {
 	defer span.End()
 
 	_, err := s.arm.DoCommand(ctx, map[string]interface{}{"move_gripper": s.conf.gripperOpenPos()})
-	return err
+	return errExec(err)
 }
 
 // pickupThetaOffset is added to the wrist (6th joint) Theta when descending to
@@ -311,7 +311,7 @@ func (s *viamChessChess) moveGripperWithTheta(ctx context.Context, p r3.Vector, 
 		Constraints:   myConstraints,
 	})
 	if err != nil {
-		return fmt.Errorf("can't move to %v: %w", myPose, err)
+		return errExec(fmt.Errorf("can't move to %v: %w", myPose, err))
 	}
 	return nil
 }
@@ -319,19 +319,19 @@ func (s *viamChessChess) moveGripperWithTheta(ctx context.Context, p r3.Vector, 
 func (s *viamChessChess) myGrab(ctx context.Context) (bool, error) {
 	got, err := s.gripper.Grab(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, errExec(err)
 	}
 
 	time.Sleep(300 * time.Millisecond)
 
 	res, err := s.arm.DoCommand(ctx, map[string]interface{}{"get_gripper": true})
 	if err != nil {
-		return false, err
+		return false, errExec(err)
 	}
 
 	p, ok := res["gripper_position"].(float64)
 	if !ok {
-		return false, fmt.Errorf("Why is get_gripper weird %v", res)
+		return false, errExec(fmt.Errorf("Why is get_gripper weird %v", res))
 	}
 
 	s.logger.Debugf("gripper res: %v", res)

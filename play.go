@@ -30,7 +30,7 @@ func (s *viamChessChess) pickMove(ctx context.Context, game *chess.Game) (*chess
 		cmdGo := uci.CmdGo{MoveTime: time.Millisecond * time.Duration(s.conf.engineMillis())}
 		err := s.engine.Run(cmdPos, cmdGo)
 		if err != nil {
-			return nil, err
+			return nil, errExec(err) // engine crash is an execution fault
 		}
 		sr := s.engine.SearchResults()
 		picked = sr.BestMove
@@ -590,9 +590,30 @@ func (s *viamChessChess) boardTick(ctx context.Context) {
 	ctx, span := trace.StartSpan(ctx, "boardTick")
 	defer span.End()
 
+	// Read the mode once at tick start. A lock-free mode change mid-tick takes
+	// effect on the NEXT tick; the in-flight arm motion below finishes first (§6.1).
+	mode := s.mode.current()
+	s.logger.Debugf("boardTick: mode=%v", mode) // per-tick; transitions log at Info
+
+	// ERROR halts the loop: do nothing until resume/reset (§6.3). Returning
+	// before taking doCommandLock keeps manual recovery commands responsive.
+	if mode == ModeError {
+		return
+	}
+
 	s.doCommandLock.Lock()
 	defer s.doCommandLock.Unlock()
 
+	// START enforces "no game" so START -> active always begins fresh (§7.1, §10.3).
+	if mode == ModeStart {
+		if err := s.ensureNoGame(); err != nil {
+			s.logger.Warnf("boardTick START: ensureNoGame failed: %v", err)
+		}
+	}
+
+	// Shared prologue for every live mode: home the arm (clears the camera),
+	// capture, warm the coord cache. A homing/capture failure here is transient,
+	// not an execution fault — skip the tick (§10.4).
 	if err := s.goToStart(ctx); err != nil {
 		s.logger.Warnf("boardTick: goToStart failed (loop tick lost): %v", err)
 		return
@@ -604,38 +625,161 @@ func (s *viamChessChess) boardTick(ctx context.Context) {
 	}
 	s.populateCacheFromCapture(all)
 
-	// Detection runs regardless of auto; mid-move errors are benign.
+	switch mode {
+	case ModeStart, ModeIdle, ModeTeaching:
+		// Passive: refresh the live snapshot only; never move a piece (§5).
+		s.setNeedsFix(false, "")
+		if err := s.refreshBoardCache(ctx, all); err != nil {
+			s.logger.Warnf("boardTick: cache refresh failed: %v", err)
+		}
+	case ModeVsHuman:
+		s.tickVsHuman(ctx, all)
+	case ModeVsSelf:
+		s.tickVsSelf(ctx, all)
+	}
+}
+
+// tickVsHuman detects the human's ply and replies as black. This is the former
+// "auto" behavior, now gated by mode.
+func (s *viamChessChess) tickVsHuman(ctx context.Context, all viscapture.VisCapture) {
+	// Detect any human ply. A detection error means the board can't be mapped to
+	// a legal move (illegal/scrambled, or a transient capture hiccup): surface
+	// needs_fix and wait for a human — never ERROR (§7.4).
 	m, err := s.checkPositionForMoves(ctx, all)
 	if err != nil {
-		s.logger.Warnf("boardTick: detection failed: %v", err)
-	} else if m != nil {
-		s.logger.Infof("boardTick: detected human move %s -> %s (auto=%v)", m.S1().String(), m.S2().String(), s.autoEnabled.Load())
+		s.setNeedsFix(true, err.Error())
 	} else {
-		s.logger.Debugf("boardTick: no move detected (camera matches game state)")
+		s.setNeedsFix(false, "")
+		if m != nil {
+			s.logger.Infof("VS_HUMAN: detected human move %s -> %s", m.S1().String(), m.S2().String())
+		}
 	}
 
-	if cacheErr := s.refreshBoardCache(ctx, all); cacheErr != nil {
-		s.logger.Warnf("boardTick: cache refresh failed: %v", cacheErr)
+	if err := s.refreshBoardCache(ctx, all); err != nil {
+		s.logger.Warnf("boardTick: cache refresh failed: %v", err)
 	}
 
-	if m == nil || !s.autoEnabled.Load() {
+	// Game-over check BEFORE replying: a human-delivered mate must not trigger a
+	// doomed makeAMove (§10.5).
+	if s.checkGameOver(ctx) {
+		return
+	}
+
+	// Reply only when a human move was just registered and it's black's turn.
+	if m == nil {
 		return
 	}
 	theState, err := s.getGame(ctx)
 	if err != nil {
+		s.logger.Warnf("VS_HUMAN: getGame failed: %v", err)
 		return
 	}
 	if theState.game.Position().Turn() != chess.Black {
-		return // auto plays black only
+		return // robot plays black only (§6.6)
 	}
 	if _, err := s.makeAMove(ctx, false); err != nil {
-		s.logger.Warnf("auto reply failed: %v", err)
+		s.handleMoveErr(ctx, "VS_HUMAN reply", err)
 		return
 	}
-	// Refresh again so the post-reply state lands in the cache without
-	// waiting for the next tick.
-	all2, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil)
-	if err == nil {
+	// Refresh so the post-reply state lands without waiting a tick.
+	if all2, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil); err == nil {
 		_ = s.refreshBoardCache(ctx, all2)
+	}
+	// The reply itself may have ended the game (e.g. engine delivers mate).
+	s.checkGameOver(ctx)
+}
+
+// tickVsSelf plays one blind ply per tick, alternating colors. No per-move
+// vision verification — it trusts the arm (§7.3).
+func (s *viamChessChess) tickVsSelf(ctx context.Context, all viscapture.VisCapture) {
+	if err := s.refreshBoardCache(ctx, all); err != nil {
+		s.logger.Warnf("boardTick: cache refresh failed: %v", err)
+	}
+
+	// Defensive: if the game already ended, park — no auto-restart (§7.3).
+	if s.checkGameOver(ctx) {
+		s.setNeedsFix(false, "")
+		return
+	}
+
+	theState, err := s.getGame(ctx)
+	if err != nil {
+		s.logger.Warnf("VS_SELF: getGame failed: %v", err)
+		return
+	}
+	// Verify the board only on the first ply of the game, reusing makeAMove's
+	// existing sanity check exactly as cmd.Go does for its first move. After that,
+	// self-play is blind and trusts the arm (§7.3).
+	firstPly := len(theState.game.Moves()) == 0
+
+	if _, err := s.makeAMove(ctx, firstPly); err != nil {
+		// On the first ply a non-exec error means the board isn't set up at the
+		// starting position yet — wait and prompt (needs_fix), don't fault.
+		if firstPly && !isExecFailure(err) {
+			s.setNeedsFix(true, err.Error())
+			return
+		}
+		s.handleMoveErr(ctx, "VS_SELF move", err)
+		return
+	}
+	s.setNeedsFix(false, "")
+
+	if all2, err := s.pieceFinder.CaptureAllFromCamera(ctx, "", viscapture.CaptureOptions{}, nil); err == nil {
+		_ = s.refreshBoardCache(ctx, all2)
+	}
+	s.checkGameOver(ctx)
+}
+
+// handleMoveErr routes a failed move: execution faults (arm/gripper/engine) halt
+// into ERROR and home the arm; anything else (non-exec) is logged and skipped.
+func (s *viamChessChess) handleMoveErr(ctx context.Context, where string, err error) {
+	if isExecFailure(err) {
+		s.logger.Errorf("%s: execution failure, entering ERROR: %v", where, err)
+		s.enterErrorAndHome(ctx)
+		return
+	}
+	s.logger.Warnf("%s failed (non-exec, staying in mode): %v", where, err)
+}
+
+// enterErrorAndHome records the fault, halts into ERROR, and homes the arm
+// best-effort. state.json is preserved (§6.3).
+func (s *viamChessChess) enterErrorAndHome(ctx context.Context) {
+	s.mode.enterError()
+	if err := s.goToStart(ctx); err != nil {
+		s.logger.Warnf("enterError: best-effort home failed: %v", err)
+	}
+}
+
+// checkGameOver parks in IDLE with resume disabled if the saved game has ended,
+// returning true. Only modes 2/3 call this.
+func (s *viamChessChess) checkGameOver(ctx context.Context) bool {
+	theState, err := s.getGame(ctx)
+	if err != nil {
+		s.logger.Warnf("game-over check: getGame failed: %v", err)
+		return false
+	}
+	if theState.game.Outcome() != chess.NoOutcome {
+		s.logger.Infof("game over (%v / %v) -> IDLE", theState.game.Outcome(), theState.game.Method())
+		s.mode.enterIdle(true)
+		return true
+	}
+	return false
+}
+
+// setNeedsFix records whether the human board currently can't be resolved to a
+// legal move; surfaced as needs_fix in the snapshot. Logs only on a state change
+// so a persistently-bad (or persistently-fine) board doesn't spam the loop.
+func (s *viamChessChess) setNeedsFix(v bool, reason string) {
+	s.boardCache.mu.Lock()
+	changed := s.boardCache.needsFix != v
+	s.boardCache.needsFix = v
+	s.boardCache.mu.Unlock()
+	if !changed {
+		return
+	}
+	if v {
+		s.logger.Warnf("needs_fix SET: board does not match the game state — waiting for a human to fix the board (%s)", reason)
+	} else {
+		s.logger.Infof("needs_fix CLEARED: board matches the game state again")
 	}
 }
