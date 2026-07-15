@@ -50,6 +50,17 @@ type ChessConfig struct {
 	// are logged and never block the move. Toggle at runtime with
 	// {"set_announce": true|false}.
 	OnMoveTarget string `json:"on_move_target,omitempty"`
+
+	// OnModeTarget is the name of a generic service that receives a domain
+	// event each time the machine changes mode (command-driven or automatic —
+	// game over, faults, resets):
+	//   {"event": "mode_changed", "mode": <int>, "mode_name": "...",
+	//    "prev_mode": <int>, "set_page": "<int-as-string>"}
+	// The set_page field lets the chess-streamdeck module flip directly to the
+	// page named after the new mode, keeping the deck in sync with mode changes
+	// it didn't initiate (web app, game over, ERROR). Optional. Empty = no
+	// dispatch. Fire-and-forget; failures are logged and never block.
+	OnModeTarget string `json:"on_mode_target,omitempty"`
 }
 
 func (cfg *ChessConfig) engine() string {
@@ -184,6 +195,13 @@ func (cfg *ChessConfig) Validate(path string) ([]string, []string, error) {
 	// and the dep resolves.
 	if cfg.OnMoveTarget != "" {
 		optionalDeps = append(optionalDeps, "rdk:service:generic/"+cfg.OnMoveTarget)
+	}
+
+	// OnModeTarget is optional for the same reason: the streamdeck config
+	// points its keys at chess, so a hard dep in the other direction would
+	// cycle the resource graph.
+	if cfg.OnModeTarget != "" {
+		optionalDeps = append(optionalDeps, "rdk:service:generic/"+cfg.OnModeTarget)
 	}
 
 	if cfg.CaptureDir != "" {

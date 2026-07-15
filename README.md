@@ -124,6 +124,11 @@ disabled — reset to play again). A board that can't be matched to the game in
 `VS_HUMAN` raises `needs_fix` in the snapshot and waits for a human; it never
 faults.
 
+Every mode change (including automatic ones) can be pushed to a generic
+service via the optional `on_mode_target` config — used to keep the
+chess-streamdeck's per-mode pages in sync. Clients that poll (the web app)
+instead read `mode` from the snapshot.
+
 ## Configuration reference
 
 ### chess config
@@ -162,6 +167,7 @@ of the resource as configured elsewhere on the machine.
 | `companion-in-check-dismiss-ms` | int | `8000` | web-app companion: how long the "check" message stays up |
 | `companion-first-move-dismiss-ms` | int | `8000` | web-app companion: how long the first-move hint stays up |
 | `on_move_target` | string | — | name of a generic service that receives a `move_made` event after every engine move (optional, fire-and-forget); toggle at runtime with the `set-announce` command |
+| `on_mode_target` | string | — | name of a generic service that receives a `mode_changed` event after every mode change, including automatic ones (game over, faults). The payload carries `set_page: "<mode>"` so the chess-streamdeck fork flips to the matching page — this keeps the deck in sync with mode changes it didn't initiate. Optional, fire-and-forget. |
 
 #### Example
 

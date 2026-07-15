@@ -176,3 +176,40 @@ func TestEnterStart(t *testing.T) {
 		t.Fatal("gameOver should be cleared")
 	}
 }
+
+// TestNotifyOnChange verifies the change hook fires exactly once per actual
+// mode change — command-driven and automatic alike — and never on rejected
+// transitions or idempotent re-entries.
+func TestNotifyOnChange(t *testing.T) {
+	var calls [][2]Mode
+	mm := &modeMachine{}
+	mm.notify = func(from, to Mode) { calls = append(calls, [2]Mode{from, to}) }
+
+	if _, err := mm.transition(ModeVsHuman); err != nil { // START -> VS_HUMAN
+		t.Fatalf("start game: %v", err)
+	}
+	mm.enterIdle(true) // game over -> IDLE
+	mm.enterIdle(true) // already IDLE: no notify
+	if _, err := mm.transition(ModeVsHuman); err == nil { // resume disabled: no notify
+		t.Fatal("resume should be rejected after game over")
+	}
+	mm.enterError() // -> ERROR
+	mm.enterError() // idempotent: no notify
+	mm.enterStart() // -> START
+	mm.enterStart() // already START: no notify
+
+	want := [][2]Mode{
+		{ModeStart, ModeVsHuman},
+		{ModeVsHuman, ModeIdle},
+		{ModeIdle, ModeError},
+		{ModeError, ModeStart},
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("notify calls = %v, want %v", calls, want)
+	}
+	for i := range want {
+		if calls[i] != want[i] {
+			t.Fatalf("notify call %d = %v, want %v (all: %v)", i, calls[i], want[i], calls)
+		}
+	}
+}

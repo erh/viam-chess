@@ -50,6 +50,20 @@ type modeMachine struct {
 	idleOrigin  Mode // where IDLE resumes to; set on entering IDLE
 	errPrevMode Mode // where ERROR resumes to; set on entering ERROR
 	gameOver    bool // set when a game ends into IDLE; disables resume
+
+	// notify, when set, is invoked after every successful mode change —
+	// command-driven and automatic alike — outside the machine's lock. It must
+	// be non-blocking; the chess service uses it to fan out fire-and-forget
+	// mode_changed dispatches (see announceModeChange).
+	notify func(from, to Mode)
+}
+
+// notifyChange invokes the change hook (if set). Callers must have released
+// the lock and must only call it when the mode actually changed.
+func (mm *modeMachine) notifyChange(from, to Mode) {
+	if mm.notify != nil {
+		mm.notify(from, to)
+	}
 }
 
 // the zero value is a valid START state with no game.
@@ -87,68 +101,77 @@ func (mm *modeMachine) snapshot() modeSnapshot {
 // see enterIdle / enterError.
 func (mm *modeMachine) transition(to Mode) (from Mode, err error) {
 	mm.mu.Lock()
-	defer mm.mu.Unlock()
-
 	from = mm.mode
+	err = mm.transitionLocked(from, to)
+	mm.mu.Unlock()
+	if err == nil {
+		mm.notifyChange(from, to)
+	}
+	return from, err
+}
+
+// transitionLocked applies the table edge from -> to, mutating state on
+// success. Caller holds mm.mu and is responsible for notifyChange.
+func (mm *modeMachine) transitionLocked(from, to Mode) error {
 	switch from {
 	case ModeStart:
 		// Choose an opponent. (Assumes the board is already set up.)
 		if to == ModeVsHuman || to == ModeVsSelf {
 			mm.mode = to
-			return from, nil
+			return nil
 		}
 	case ModeVsHuman:
 		switch to {
 		case ModeTeaching: // toggle teaching, game preserved
 			mm.mode = ModeTeaching
-			return from, nil
+			return nil
 		case ModeIdle: // pause
 			mm.idleOrigin = ModeVsHuman
 			mm.gameOver = false
 			mm.mode = ModeIdle
-			return from, nil
+			return nil
 		}
 	case ModeVsSelf:
 		if to == ModeIdle { // pause
 			mm.idleOrigin = ModeVsSelf
 			mm.gameOver = false
 			mm.mode = ModeIdle
-			return from, nil
+			return nil
 		}
 	case ModeTeaching:
 		switch to {
 		case ModeVsHuman: // back to game
 			mm.mode = ModeVsHuman
-			return from, nil
+			return nil
 		case ModeIdle: // pause
 			mm.idleOrigin = ModeTeaching
 			mm.gameOver = false
 			mm.mode = ModeIdle
-			return from, nil
+			return nil
 		}
 	case ModeIdle:
 		if to == ModeStart { // reset
 			mm.mode = ModeStart
 			mm.gameOver = false
-			return from, nil
+			return nil
 		}
 		if to == mm.idleOrigin && !mm.gameOver { // resume (disabled once gameOver)
 			mm.mode = to
-			return from, nil
+			return nil
 		}
 	case ModeError:
 		if to == ModeStart { // reset
 			mm.mode = ModeStart
 			mm.gameOver = false
-			return from, nil
+			return nil
 		}
 		if to == mm.errPrevMode { // resume (caller verifies game is intact)
 			mm.mode = to
-			return from, nil
+			return nil
 		}
 	}
 
-	return from, fmt.Errorf("illegal transition %v -> %v (idleOrigin=%v errPrev=%v gameOver=%v)",
+	return fmt.Errorf("illegal transition %v -> %v (idleOrigin=%v errPrev=%v gameOver=%v)",
 		from, to, mm.idleOrigin, mm.errPrevMode, mm.gameOver)
 }
 
@@ -158,16 +181,22 @@ func (mm *modeMachine) transition(to Mode) (from Mode, err error) {
 // abandoned (START/ERROR) it is a no-op.
 func (mm *modeMachine) enterIdle(gameOver bool) {
 	mm.mu.Lock()
-	defer mm.mu.Unlock()
+	from := mm.mode
+	changed := false
 	switch mm.mode {
 	case ModeVsHuman, ModeVsSelf, ModeTeaching:
 		mm.idleOrigin = mm.mode
 		mm.gameOver = gameOver
 		mm.mode = ModeIdle
+		changed = true
 	case ModeIdle:
 		if gameOver {
 			mm.gameOver = true
 		}
+	}
+	mm.mu.Unlock()
+	if changed {
+		mm.notifyChange(from, ModeIdle)
 	}
 }
 
@@ -176,21 +205,28 @@ func (mm *modeMachine) enterIdle(gameOver bool) {
 // active game.
 func (mm *modeMachine) enterStart() {
 	mm.mu.Lock()
-	defer mm.mu.Unlock()
+	from := mm.mode
 	mm.mode = ModeStart
 	mm.gameOver = false
+	mm.mu.Unlock()
+	if from != ModeStart {
+		mm.notifyChange(from, ModeStart)
+	}
 }
 
 // enterError records the current mode and halts into ERROR. Called on any
 // execution failure (see isExecFailure). Idempotent.
 func (mm *modeMachine) enterError() {
 	mm.mu.Lock()
-	defer mm.mu.Unlock()
 	if mm.mode == ModeError {
+		mm.mu.Unlock()
 		return
 	}
-	mm.errPrevMode = mm.mode
+	from := mm.mode
+	mm.errPrevMode = from
 	mm.mode = ModeError
+	mm.mu.Unlock()
+	mm.notifyChange(from, ModeError)
 }
 
 // execError marks a failure as an execution fault (arm/gripper/engine) — the
