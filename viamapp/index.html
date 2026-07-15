@@ -178,6 +178,7 @@
           <button id="btn-refresh" class="btn btn-sm">Refresh</button>
           <button id="btn-snapshot" class="btn btn-sm">Snapshot</button>
           <button id="btn-cache" class="btn btn-sm">Clear cache</button>
+          <button id="btn-set-fen" class="btn btn-sm">Set board</button>
           <button id="btn-wipe" class="btn btn-sm danger">Wipe state</button>
           <button id="btn-reset" class="btn btn-sm danger">Reset board</button>
         </div>
@@ -191,6 +192,56 @@
           <button id="btn-difficulty" class="btn btn-sm">Set</button>
         </div>
       </footer>
+    </div>
+
+    <!-- Set Board modal -->
+    <div id="set-board-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="sb-title">
+      <div class="modal-box sb-modal-box">
+        <div class="sb-header">
+          <h2 class="modal-title" id="sb-title">Set board state</h2>
+          <p class="modal-desc">Click piece to remove · drag or select palette then click to place</p>
+        </div>
+
+        <div class="sb-stage">
+          <!-- Left: white graveyard + palette -->
+          <div class="sb-side">
+            <span class="eyebrow-xxs">White lost</span>
+            <div class="sb-gy-zone" id="sb-white-gy"></div>
+            <div class="sb-palette-col" id="sb-white-palette"></div>
+          </div>
+
+          <!-- Center: board + turn -->
+          <div class="sb-center">
+            <div class="sb-board-wrap">
+              <div id="sb-board" class="sb-board"></div>
+            </div>
+            <div class="sb-turn-row">
+              <label class="sb-turn-opt">
+                <input type="radio" name="sb-turn" id="sb-turn-w" value="w" />
+                <span class="eyebrow-xxs">White to move</span>
+              </label>
+              <label class="sb-turn-opt">
+                <input type="radio" name="sb-turn" id="sb-turn-b" value="b" />
+                <span class="eyebrow-xxs">Black to move</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Right: black graveyard + palette -->
+          <div class="sb-side">
+            <span class="eyebrow-xxs">Black lost</span>
+            <div class="sb-gy-zone" id="sb-black-gy"></div>
+            <div class="sb-palette-col" id="sb-black-palette"></div>
+          </div>
+        </div>
+
+        <div id="sb-error" class="modal-error hidden"></div>
+
+        <div class="modal-actions">
+          <button id="sb-cancel" class="btn">Cancel</button>
+          <button id="sb-confirm" class="btn btn-accent">Set state</button>
+        </div>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>

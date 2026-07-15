@@ -19,6 +19,7 @@ export interface CompanionCallbacks {
   onStartSelfPlay: () => Promise<void>; // START -> VS_SELF
   onWipe: () => void;
   onReset: () => void;
+  onSetBoard: () => void; // open the set-board editor (sync state to the physical board)
 }
 
 export interface CompanionOptions {
@@ -1078,11 +1079,15 @@ function buildActions(scenario: Scenario, onDismissOrMinimize: () => void): HTML
       addBtn("Got it", true, onDismissOrMinimize);
       break;
     case "bad-state":
-      addBtn("Wipe state", true, () => { cbs?.onWipe(); onDismissOrMinimize(); });
+      // Set board (sync my memory to the physical board, no arm movement) is
+      // the better fit for minor drift; wipe+reset only when the position is lost.
+      addBtn("Set board", true, () => { cbs?.onSetBoard(); onDismissOrMinimize(); });
+      addBtn("Wipe state", false, () => { cbs?.onWipe(); onDismissOrMinimize(); });
       addBtn("Not now", false, onDismissOrMinimize);
       break;
     case "needs-fix":
       addBtn("OK — I fixed it", true, onDismissOrMinimize);
+      addBtn("Set board", false, () => { cbs?.onSetBoard(); onDismissOrMinimize(); });
       addBtn("Wipe state", false, () => { cbs?.onWipe(); onDismissOrMinimize(); });
       break;
     case "won":

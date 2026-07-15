@@ -853,3 +853,209 @@ select.input option { background: var(--bg-2); color: var(--text-1); }
 .app.kiosk .cam-toggle { padding: 14px 22px; }
 
 .app.kiosk .bottom-bar { padding: 14px 24px; gap: 16px; }
+/* ── Set-Board modal ────────────────────────────────────────────────────────*/
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal-overlay.hidden { display: none !important; }
+
+.modal-box {
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 24px;
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+.sb-modal-box { max-width: 600px; }
+
+.modal-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-1);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.modal-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  margin: 0;
+}
+.modal-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--danger);
+  background: var(--danger-dim);
+  border: 1px solid var(--danger);
+  border-radius: 2px;
+  padding: 6px 10px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-1);
+}
+
+.sb-header { display: flex; flex-direction: column; gap: 4px; }
+
+/* Set-board stage layout — no text selection during heavy drag-drop */
+.sb-modal-box { user-select: none; }
+.sb-stage {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.sb-side {
+  width: 72px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sb-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Modal board */
+.sb-board-wrap { width: 100%; }
+.sb-board {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--line-2);
+}
+.sb-square {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+}
+.sb-square.light { background: var(--board-light); }
+.sb-square.dark  { background: var(--board-dark); }
+
+/* Coordinates — match main board pattern */
+.sb-square .coord {
+  position: absolute;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  pointer-events: none;
+}
+.sb-square .coord.file { bottom: 2px; right: 4px; }
+.sb-square .coord.rank { top: 2px; left: 4px; }
+.sb-square.light .coord { color: rgba(0, 0, 0, 0.4); }
+.sb-square.dark .coord  { color: rgba(255, 255, 255, 0.75); }
+
+.sb-square.sb-drag-over { outline: 2px inset rgba(127, 209, 168, 0.55); }
+.sb-piece {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 5%;
+  cursor: grab;
+  transition: filter 80ms ease;
+  user-select: none;
+  -webkit-user-drag: element;
+}
+
+/* Remove-on-click hint: dim + × in corner when no palette selected */
+.sb-board:not(.palette-active) .sb-square.sb-has-piece { cursor: pointer; }
+.sb-board:not(.palette-active) .sb-square.sb-has-piece:hover .sb-piece { filter: brightness(0.68); }
+.sb-board:not(.palette-active) .sb-square.sb-has-piece:hover::after {
+  content: '×';
+  position: absolute;
+  top: 2px; right: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--danger);
+  pointer-events: none;
+  z-index: 2;
+  text-shadow: 0 0 3px rgba(0,0,0,0.7);
+}
+
+/* Palette-active: show accent glow on hover squares */
+.sb-board.palette-active .sb-square { cursor: cell; }
+.sb-board.palette-active .sb-square:hover { outline: 2px inset var(--accent-line); background-blend-mode: normal; }
+
+/* Graveyard zone */
+.sb-gy-zone {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-height: 36px;
+  padding: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: 2px;
+  align-content: flex-start;
+  transition: border-color 80ms ease, background 80ms ease;
+}
+.sb-gy-zone.sb-drag-over { border-color: var(--accent); background: var(--accent-dim); }
+.sb-gy-piece {
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: filter 80ms ease;
+}
+.sb-gy-piece:hover { filter: brightness(0.78); outline: 1px solid var(--danger); border-radius: 2px; }
+
+/* Piece palette column — mid-tone bg so black pieces are visible */
+.sb-palette-col {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.sb-palette-piece {
+  width: 32px;
+  height: 32px;
+  cursor: grab;
+  background: #8b7355;
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  padding: 3px;
+  object-fit: contain;
+  transition: background 80ms ease, border-color 80ms ease, outline 80ms ease;
+  user-select: none;
+  -webkit-user-drag: element;
+}
+.sb-palette-piece:hover { background: #9e8567; border-color: var(--text-4); }
+.sb-palette-piece.sb-palette-selected {
+  outline: 2px solid var(--accent);
+  background: #7a6348;
+  cursor: cell;
+}
+
+/* Turn toggle */
+.sb-turn-row {
+  display: flex;
+  gap: 16px;
+}
+.sb-turn-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.sb-turn-opt input { accent-color: var(--accent); margin: 0; cursor: pointer; }

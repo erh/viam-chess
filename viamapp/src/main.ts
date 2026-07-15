@@ -499,6 +499,17 @@ function applyCommandAvailability() {
     resetBtn.disabled = busy || currentMode === MODE_ERROR;
     resetBtn.title = currentMode === MODE_ERROR ? "physical reset is disabled while faulted — use Reset state" : "";
   }
+  // set-board is only rejected by the server in START (its tick wipes the
+  // saved game) and VS_SELF; it stays available in ERROR, where repairing the
+  // saved state is what re-enables resume.
+  const setBoardBlocked = modeKnown && (currentMode === MODE_START || currentMode === MODE_VS_SELF);
+  const setBoardBtn = document.getElementById("btn-set-fen") as HTMLButtonElement | null;
+  if (setBoardBtn) {
+    setBoardBtn.disabled = busy || setBoardBlocked;
+    setBoardBtn.title = !setBoardBlocked ? "" :
+      currentMode === MODE_START ? "no game to edit — START wipes the saved state; start a game first" :
+      "not available during self-play — pause first";
+  }
 }
 
 // ── Eval bar ───────────────────────────────────────────────────────────────
@@ -1433,7 +1444,304 @@ function toggleCamera() {
   else void detachCamera();
 }
 
+// ── Set-Board modal ────────────────────────────────────────────────────────
+// Board editor for the set-board command: sync the game state to whatever is
+// on the physical board, without moving the arm. Recovery tool for drift.
+
+let sbBoard: (string | null)[][] = emptyBoard();
+let sbWhiteGY: string[] = [];
+let sbBlackGY: string[] = [];
+let sbTurn: "w" | "b" = "w";
+type SBDragSrc = { kind: "board"; sq: string; piece: string } | { kind: "palette"; piece: string };
+let sbDragSrc: SBDragSrc | null = null;
+let sbPaletteSelected: string | null = null;
+
+function sqToRc(sq: string): [number, number] {
+  return [8 - parseInt(sq[1], 10), sq.charCodeAt(0) - 97];
+}
+
+function sbBoardToFEN(): string {
+  const placement = sbBoard
+    .map((row) => {
+      let s = "";
+      let empty = 0;
+      for (const p of row) {
+        if (!p) { empty++; }
+        else { if (empty) { s += empty; empty = 0; } s += p; }
+      }
+      if (empty) s += empty;
+      return s;
+    })
+    .join("/");
+  // Castling is inferred from king/rook home squares — an edited position has
+  // no move history to derive rights from.
+  let castling = "";
+  if (sbBoard[7]?.[4] === "K") {
+    if (sbBoard[7]?.[7] === "R") castling += "K";
+    if (sbBoard[7]?.[0] === "R") castling += "Q";
+  }
+  if (sbBoard[0]?.[4] === "k") {
+    if (sbBoard[0]?.[7] === "r") castling += "k";
+    if (sbBoard[0]?.[0] === "r") castling += "q";
+  }
+  return `${placement} ${sbTurn} ${castling || "-"} - 0 1`;
+}
+
+function setSBPaletteSelected(piece: string | null) {
+  sbPaletteSelected = piece;
+  document.getElementById("sb-board")?.classList.toggle("palette-active", piece !== null);
+  const wGY = document.getElementById("sb-white-gy");
+  const bGY = document.getElementById("sb-black-gy");
+  if (!piece) {
+    if (wGY) wGY.style.cursor = "";
+    if (bGY) bGY.style.cursor = "";
+  } else {
+    const isWhite = piece === piece.toUpperCase();
+    if (wGY) wGY.style.cursor = isWhite ? "pointer" : "not-allowed";
+    if (bGY) bGY.style.cursor = isWhite ? "not-allowed" : "pointer";
+  }
+  document.querySelectorAll<HTMLImageElement>(".sb-palette-piece").forEach((el) => {
+    el.classList.toggle("sb-palette-selected", el.dataset.piece === piece);
+  });
+}
+
+function renderSBBoard() {
+  const boardEl = document.getElementById("sb-board");
+  if (!boardEl) return;
+  boardEl.innerHTML = "";
+  boardEl.classList.toggle("palette-active", sbPaletteSelected !== null);
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const sq = rcToSq(r, c);
+      const isLight = (r + c) % 2 === 0;
+      const piece = sbBoard[r]?.[c] ?? null;
+      const cell = document.createElement("div");
+      cell.className = `sb-square ${isLight ? "light" : "dark"}`;
+      cell.dataset.sq = sq;
+      if (r === 7) {
+        const f = document.createElement("span");
+        f.className = "coord file";
+        f.textContent = String.fromCharCode(97 + c);
+        cell.appendChild(f);
+      }
+      if (c === 0) {
+        const ra = document.createElement("span");
+        ra.className = "coord rank";
+        ra.textContent = String(8 - r);
+        cell.appendChild(ra);
+      }
+      if (piece) {
+        cell.classList.add("sb-has-piece");
+        const url = pieceUrl(piece);
+        if (url) {
+          const img = document.createElement("img");
+          img.className = "piece sb-piece";
+          img.src = url;
+          img.alt = piece;
+          img.draggable = true;
+          img.addEventListener("dragstart", (e) => {
+            sbDragSrc = { kind: "board", sq, piece };
+            e.dataTransfer?.setData("text/plain", sq);
+          });
+          img.addEventListener("dragend", () => { sbDragSrc = null; });
+          cell.appendChild(img);
+        }
+      }
+      // Click handler on every cell:
+      // occupied square → always remove; empty square + palette selected → place
+      cell.addEventListener("click", () => {
+        if (sbDragSrc) return;
+        if (piece) {
+          sbBoard[r][c] = null;
+          renderSBBoard();
+        } else if (sbPaletteSelected) {
+          sbBoard[r][c] = sbPaletteSelected;
+          renderSBBoard();
+        }
+      });
+      cell.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        cell.classList.add("sb-drag-over");
+      });
+      cell.addEventListener("dragleave", () => cell.classList.remove("sb-drag-over"));
+      cell.addEventListener("drop", (e) => {
+        e.preventDefault();
+        cell.classList.remove("sb-drag-over");
+        if (!sbDragSrc) return;
+        if (sbDragSrc.kind === "board" && sbDragSrc.sq !== sq) {
+          const [sr, sc] = sqToRc(sbDragSrc.sq);
+          sbBoard[sr][sc] = null;
+        }
+        sbBoard[r][c] = sbDragSrc.piece;
+        sbDragSrc = null;
+        renderSBBoard();
+      });
+      boardEl.appendChild(cell);
+    }
+  }
+}
+
+function renderSBGY(id: string, pieces: string[], isWhite: boolean) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = "";
+  pieces.forEach((p, idx) => {
+    const url = pieceUrl(p);
+    if (!url) return;
+    const img = document.createElement("img");
+    img.className = "sb-gy-piece";
+    img.src = url;
+    img.alt = p;
+    img.title = "Click to remove";
+    img.addEventListener("click", () => {
+      if (isWhite) sbWhiteGY.splice(idx, 1);
+      else sbBlackGY.splice(idx, 1);
+      renderSBGYs();
+    });
+    el.appendChild(img);
+  });
+}
+
+function renderSBGYs() {
+  renderSBGY("sb-white-gy", sbWhiteGY, true);
+  renderSBGY("sb-black-gy", sbBlackGY, false);
+}
+
+function initSBPalette(id: string, pieces: string[]) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = "";
+  for (const piece of pieces) {
+    const url = pieceUrl(piece);
+    if (!url) continue;
+    const img = document.createElement("img");
+    img.className = "sb-palette-piece";
+    img.src = url;
+    img.alt = piece;
+    img.draggable = true;
+    img.dataset.piece = piece;
+    img.addEventListener("dragstart", () => { sbDragSrc = { kind: "palette", piece }; setSBPaletteSelected(null); });
+    img.addEventListener("dragend", () => { sbDragSrc = null; });
+    // Click-to-select: toggle selection; deselect if clicking same piece
+    img.addEventListener("click", () => {
+      setSBPaletteSelected(sbPaletteSelected === piece ? null : piece);
+    });
+    el.appendChild(img);
+  }
+}
+
+function setupSBGYDropZone(id: string, isWhite: boolean) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("click", () => {
+    if (!sbPaletteSelected) return;
+    const pieceIsWhite = sbPaletteSelected === sbPaletteSelected.toUpperCase();
+    if (pieceIsWhite !== isWhite) return;
+    if (isWhite) sbWhiteGY.push(sbPaletteSelected);
+    else sbBlackGY.push(sbPaletteSelected);
+    renderSBGYs();
+  });
+  el.addEventListener("dragover", (e) => {
+    if (!sbDragSrc) return;
+    const pieceIsWhite = sbDragSrc.piece === sbDragSrc.piece.toUpperCase();
+    if (pieceIsWhite !== isWhite) return;
+    e.preventDefault();
+    el.classList.add("sb-drag-over");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("sb-drag-over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("sb-drag-over");
+    if (!sbDragSrc) return;
+    const pieceIsWhite = sbDragSrc.piece === sbDragSrc.piece.toUpperCase();
+    if (pieceIsWhite !== isWhite) { sbDragSrc = null; return; }
+    if (sbDragSrc.kind === "board") {
+      const [sr, sc] = sqToRc(sbDragSrc.sq);
+      sbBoard[sr][sc] = null;
+      renderSBBoard();
+    }
+    if (isWhite) sbWhiteGY.push(sbDragSrc.piece);
+    else sbBlackGY.push(sbDragSrc.piece);
+    sbDragSrc = null;
+    renderSBGYs();
+  });
+}
+
+function openSBModal() {
+  if (currentFen) {
+    const parsed = parseFENPlacement(currentFen);
+    sbBoard = parsed.board;
+    sbTurn = parsed.turn;
+  } else {
+    sbBoard = emptyBoard();
+    sbTurn = "w";
+  }
+  sbWhiteGY = [...whiteGraveyard];
+  sbBlackGY = [...blackGraveyard];
+  sbPaletteSelected = null;
+  const wRadio = document.getElementById("sb-turn-w") as HTMLInputElement | null;
+  const bRadio = document.getElementById("sb-turn-b") as HTMLInputElement | null;
+  if (wRadio) wRadio.checked = sbTurn === "w";
+  if (bRadio) bRadio.checked = sbTurn === "b";
+  initSBPalette("sb-white-palette", ["K", "Q", "R", "B", "N", "P"]);
+  initSBPalette("sb-black-palette", ["k", "q", "r", "b", "n", "p"]);
+  renderSBBoard();
+  renderSBGYs();
+  document.getElementById("sb-error")?.classList.add("hidden");
+  document.getElementById("set-board-modal")?.classList.remove("hidden");
+}
+
+function closeSBModal() {
+  setSBPaletteSelected(null);
+  document.getElementById("set-board-modal")?.classList.add("hidden");
+}
+
+async function cmdSetBoard() {
+  document.getElementById("sb-error")?.classList.add("hidden");
+  try {
+    const fen = sbBoardToFEN();
+    await withBusy(async () => {
+      await doCommand({
+        "set-board": {
+          fen,
+          white_graveyard: sbWhiteGY,
+          black_graveyard: sbBlackGY,
+        },
+      });
+      resetTape();
+      lastMove = null;
+      serverAuthoritative = true;
+      suppressFenInferOnce = true;
+      pushEvent("wipe", "board state set");
+    });
+    closeSBModal();
+  } catch (e) {
+    // The server rejects set-board in START (its tick wipes the saved game) —
+    // that rejection, like any other failure, surfaces inline in the modal.
+    const msg = e instanceof Error ? e.message : String(e);
+    const errEl = document.getElementById("sb-error");
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove("hidden"); }
+  }
+}
+
 // ── Wire events ────────────────────────────────────────────────────────────
+
+setupSBGYDropZone("sb-white-gy", true);
+setupSBGYDropZone("sb-black-gy", false);
+document.getElementById("btn-set-fen")!.addEventListener("click", openSBModal);
+document.getElementById("sb-cancel")!.addEventListener("click", closeSBModal);
+document.getElementById("sb-confirm")!.addEventListener("click", () => void cmdSetBoard());
+document.getElementById("set-board-modal")!.addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeSBModal();
+});
+document.getElementById("sb-turn-w")!.addEventListener("change", () => { sbTurn = "w"; });
+document.getElementById("sb-turn-b")!.addEventListener("change", () => { sbTurn = "b"; });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (sbPaletteSelected) { setSBPaletteSelected(null); return; }
+    if (!document.getElementById("set-board-modal")?.classList.contains("hidden")) closeSBModal();
+  }
+});
 
 document.getElementById("btn-go")!.addEventListener("click", () => void cmdGo());
 document.getElementById("tape-logs-toggle")!.addEventListener("click", () => {
@@ -1493,6 +1801,7 @@ companion.init({
   onStartSelfPlay: async () => { await setModeOnServer(MODE_VS_SELF); },
   onWipe: () => void cmdMaintenance("wipe", true),
   onReset: () => void cmdMaintenance("reset", true),
+  onSetBoard: openSBModal,
 });
 
 if (new URLSearchParams(window.location.search).has("compact")) {
