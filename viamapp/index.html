@@ -57,10 +57,11 @@
 
         <div class="vrule short"></div>
 
-        <label class="auto-toggle">
-          <input type="checkbox" id="auto-mode" />
-          <span class="eyebrow-xxs">Auto</span>
-        </label>
+        <div class="mode-ctl">
+          <span class="eyebrow-xxs">Mode</span>
+          <span id="mode-chip" class="mode-chip mono">—</span>
+          <span id="mode-actions" class="mode-actions"></span>
+        </div>
 
         <div class="flex-spacer"></div>
 
@@ -82,6 +83,19 @@
           </span>
         </div>
       </header>
+
+      <!-- Robot fault banner (mode 5 / ERROR) -->
+      <div id="error-banner" class="error-banner hidden">
+        <span class="error-banner-icon">⚠</span>
+        <div class="error-banner-text">
+          <strong>Robot fault — the arm has halted.</strong>
+          <span>Clear any obstruction, then resume the game or reset. The physical board reset is disabled until the fault is cleared.</span>
+        </div>
+        <div class="error-banner-actions">
+          <button id="btn-error-resume" class="btn btn-sm">▶ Resume game</button>
+          <button id="btn-error-reset" class="btn btn-sm danger">Reset state</button>
+        </div>
+      </div>
 
       <!-- Main stage -->
       <div class="main-stage">

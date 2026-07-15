@@ -4,7 +4,7 @@
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type GameOutcome = "white-won" | "black-won" | "draw" | "";
-type Scenario = "welcome" | "first-move" | "first-capture" | "in-check" | "bad-state" | "won" | "lost" | "draw";
+type Scenario = "welcome" | "first-move" | "first-capture" | "in-check" | "bad-state" | "needs-fix" | "won" | "lost" | "draw";
 type Mood = "welcome" | "positive" | "neutral" | "sad" | "warn";
 
 interface CopyItem {
@@ -15,8 +15,8 @@ interface CopyItem {
 }
 
 export interface CompanionCallbacks {
-  onAutoEnable: () => Promise<void>;
-  onAutoDisable: () => Promise<void>;
+  onStartGame: () => Promise<void>;     // START -> VS_HUMAN
+  onStartSelfPlay: () => Promise<void>; // START -> VS_SELF
   onWipe: () => void;
   onReset: () => void;
 }
@@ -26,6 +26,7 @@ export interface CompanionOptions {
   welcomeReviveMs?: number;       // re-show welcome after dismiss (default 60 s)
   inCheckDismissMs?: number;      // auto-hide in-check bubble (default 8 s)
   firstMoveDismissMs?: number;    // auto-hide first-move bubble (default 8 s)
+  needsFixDelayMs?: number;       // debounce before the needs-fix modal (default 12 s)
 }
 
 // ── Copy pools (voice: Garry, chess master) ───────────────────────────────
@@ -39,7 +40,7 @@ const COPY: Record<Scenario, CopyItem[]> = {
         "You play white. Push a piece on the physical board, or drag one here.",
         "The arm next to you is mine. I\u2019ll move my pieces with it on my turn.",
         "Watch the TAPE on the right \u2014 every move shows up there in order.",
-        "Flip AUTO on whenever you\u2019re ready. White moves first.",
+        "Make sure the board is set up, then hit START GAME. White moves first.",
       ],
     },
   ],
@@ -93,6 +94,26 @@ const COPY: Record<Scenario, CopyItem[]> = {
       ],
     },
   ],
+  "needs-fix": [
+    {
+      eyebrow: "Board mismatch",
+      title: "Put that back, please.",
+      bullets: [
+        "The physical board no longer matches our game \u2014 check the marked squares on screen.",
+        "Move the pieces back to match, and we\u2019ll pick up right where we left off.",
+        "Hopelessly tangled? \u201cWipe state\u201d below starts us fresh.",
+      ],
+    },
+    {
+      eyebrow: "Lost the plot",
+      title: "That\u2019s not where we were.",
+      bullets: [
+        "I can\u2019t match the board to our game. The marked squares show what\u2019s off.",
+        "Restore the position and I\u2019ll carry on automatically.",
+        "Or wipe my state and we\u2019ll start a new game.",
+      ],
+    },
+  ],
   won: [
     { eyebrow: "Checkmate", title: "You beat me.", body: "Well played. Reset the board for a rematch \u2014 I\u2019ll go pack up the pieces myself." },
     { eyebrow: "Victory", title: "That was excellent.", body: "Hats off. Hit Reset and the arm will tidy up for round two." },
@@ -115,6 +136,7 @@ const MOOD: Record<Scenario, Mood> = {
   "first-capture": "neutral",
   "in-check": "warn",
   "bad-state": "warn",
+  "needs-fix": "warn",
   won: "positive",
   lost: "sad",
   draw: "neutral",
@@ -126,6 +148,7 @@ const BLOCKING: Record<Scenario, boolean> = {
   "first-capture": true,
   "in-check": false,
   "bad-state": true,
+  "needs-fix": true,
   won: true,
   lost: true,
   draw: true,
@@ -151,6 +174,7 @@ let badStateDelayMs      = 60_000;
 let welcomeReviveMs      = 60_000;
 let inCheckDismissMs     = 8_000;
 let firstMoveDismissMs   = 8_000;
+let needsFixDelayMs      = 12_000;
 
 let activeScenario: Scenario | null = null;
 let activeCopy: CopyItem | null = null;
@@ -159,9 +183,15 @@ let badStateMinimized = false;
 let badStateReviveTimer: ReturnType<typeof setTimeout> | null = null;
 let badStateAppearTimer: ReturnType<typeof setTimeout> | null = null;
 
+// needs_fix is the server's authoritative "human must fix the board" flag.
+// It can flicker for a single loop tick while a hand is over the board, so we
+// debounce the modal; it clears itself the moment the server is happy again.
+let needsFixMinimized = false;
+let needsFixAppearTimer: ReturnType<typeof setTimeout> | null = null;
+
 let welcomeDismissedCount = 0;
 let welcomeRevivedOnce = false;
-let welcomeAutoOn = false;
+let welcomeStarted = false;
 let welcomeReviveTimer: ReturnType<typeof setTimeout> | null = null;
 
 let firstMoveBubbleDone = false;
@@ -177,10 +207,11 @@ let gameEndScenario: "won" | "lost" | "draw" | null = null;
 let gameEndDismissed = false;
 
 let extPlyCount = 0;
-let extAutoMode = false;
+let extGameActive = false;
 let extMismatchCount = 0;
 let extOutcome: GameOutcome = "";
 let extInCheck = false;
+let extNeedsFix = false;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -195,15 +226,19 @@ export function configure(options: CompanionOptions): void {
   if (options.welcomeReviveMs      !== undefined) welcomeReviveMs      = options.welcomeReviveMs;
   if (options.inCheckDismissMs     !== undefined) inCheckDismissMs     = options.inCheckDismissMs;
   if (options.firstMoveDismissMs   !== undefined) firstMoveDismissMs   = options.firstMoveDismissMs;
+  if (options.needsFixDelayMs      !== undefined) needsFixDelayMs      = options.needsFixDelayMs;
 }
 
-export function onInit(plyCount: number, autoMode: boolean, mismatchCount: number, outcome: GameOutcome, inCheck = false): void {
+export function onInit(plyCount: number, gameActive: boolean, mismatchCount: number, outcome: GameOutcome, inCheck = false, needsFix = false): void {
   extPlyCount = plyCount;
-  extAutoMode = autoMode;
+  extGameActive = gameActive;
   extMismatchCount = mismatchCount;
   extOutcome = outcome;
   extInCheck = inCheck;
+  extNeedsFix = needsFix;
   initialized = true;
+
+  if (needsFix && !outcome) scheduleNeedsFixAppear();
 
   if (outcome) {
     const sc = outcomeToScenario(outcome);
@@ -239,21 +274,31 @@ export function onInit(plyCount: number, autoMode: boolean, mismatchCount: numbe
   render();
 }
 
-export function onSnapshot(plyCount: number, autoMode: boolean, mismatchCount: number, outcome: GameOutcome, inCheck = false): void {
+export function onSnapshot(plyCount: number, gameActive: boolean, mismatchCount: number, outcome: GameOutcome, inCheck = false, needsFix = false): void {
   if (!initialized) return;
 
   const prevOutcome = extOutcome;
   const prevMismatchCount = extMismatchCount;
   const prevPlyCount = extPlyCount;
   const prevInCheck = extInCheck;
+  const prevNeedsFix = extNeedsFix;
 
   extPlyCount = plyCount;
-  extAutoMode = autoMode;
+  extGameActive = gameActive;
   extMismatchCount = mismatchCount;
   extOutcome = outcome;
   extInCheck = inCheck;
+  extNeedsFix = needsFix;
 
   let dirty = false;
+
+  // needs-fix: rising edge arms the (debounced) modal; falling edge clears it
+  // immediately — the server has re-matched the board to the game.
+  if (needsFix && !prevNeedsFix && !outcome) {
+    scheduleNeedsFixAppear();
+  } else if (!needsFix && prevNeedsFix) {
+    if (clearNeedsFix()) dirty = true;
+  }
 
   // New game end
   if (!prevOutcome && outcome) {
@@ -278,8 +323,9 @@ export function onSnapshot(plyCount: number, autoMode: boolean, mismatchCount: n
     dirty = true;
   }
 
-  // Bad-state management (no game end)
-  if (!outcome) {
+  // Bad-state management (no game end). Skipped while the server's needs_fix
+  // flag is up — that path has its own, authoritative modal.
+  if (!outcome && !extNeedsFix) {
     if (mismatchCount > 0 && activeScenario !== "bad-state" && !badStateMinimized && !badStateAppearTimer) {
       badStateAppearTimer = setTimeout(() => {
         badStateAppearTimer = null;
@@ -351,11 +397,14 @@ export function onReset(): void {
   badStateMinimized = false;
   if (badStateReviveTimer) { clearTimeout(badStateReviveTimer); badStateReviveTimer = null; }
   if (badStateAppearTimer) { clearTimeout(badStateAppearTimer); badStateAppearTimer = null; }
+  needsFixMinimized = false;
+  if (needsFixAppearTimer) { clearTimeout(needsFixAppearTimer); needsFixAppearTimer = null; }
+  extNeedsFix = false;
   gameEndScenario = null;
   gameEndDismissed = false;
   welcomeDismissedCount = 0;
   welcomeRevivedOnce = false;
-  welcomeAutoOn = false;
+  welcomeStarted = false;
   if (welcomeReviveTimer) { clearTimeout(welcomeReviveTimer); welcomeReviveTimer = null; }
   firstMoveBubbleDone = false;
   firstCaptureDone = false;
@@ -366,6 +415,7 @@ export function onReset(): void {
   extPlyCount = 0;
   extOutcome = "";
   extMismatchCount = 0;
+  extGameActive = false;
 
   setActiveScenario("welcome");
   scheduleWelcomeRevive();
@@ -377,27 +427,20 @@ export function forceScenario(sc: string): void {
   render();
 }
 
-export function onAutoToggle(enabled: boolean): void {
-  extAutoMode = enabled;
-  const changed = welcomeAutoOn !== enabled;
-  welcomeAutoOn = enabled;
-  if (enabled && welcomeReviveTimer) {
+// Called when a game was started outside the welcome modal (top-bar mode
+// control, auto-start on a drag move) so the modal reflects it if it's open.
+export function onGameStarted(): void {
+  extGameActive = true;
+  const changed = !welcomeStarted;
+  welcomeStarted = true;
+  if (welcomeReviveTimer) {
     clearTimeout(welcomeReviveTimer);
     welcomeReviveTimer = null;
   }
   if (activeScenario === "welcome" && changed) {
     // Surgical update — avoid full re-render (root.innerHTML="" causes a visible flash
     // even when the animation is suppressed, because the browser can paint the empty state)
-    const box = document.querySelector<HTMLElement>("#companion-root .auto-cb-box");
-    const msg = document.querySelector<HTMLElement>("#companion-root .auto-ready-msg");
-    if (box) {
-      box.style.background = enabled ? "#0e0f10" : "transparent";
-      box.textContent = enabled ? "\u2713" : "";
-    }
-    if (msg) {
-      msg.style.display = enabled ? "flex" : "none";
-      if (enabled) msg.style.animation = "cp-fade-in 220ms ease-out";
-    }
+    updateWelcomeStartVisuals();
   }
 }
 
@@ -431,7 +474,6 @@ function outcomeToScenario(o: GameOutcome): "won" | "lost" | "draw" | null {
 function doWelcomeDismiss(auto = false): void {
   if (activeScenario === "welcome") activeScenario = null;
   welcomeDismissedCount++;
-  welcomeAutoOn = false;
   if (welcomeReviveTimer) { clearTimeout(welcomeReviveTimer); welcomeReviveTimer = null; }
   if (!auto) scheduleWelcomeRevive();
 }
@@ -443,12 +485,36 @@ function clearBadState(): void {
   if (badStateAppearTimer) { clearTimeout(badStateAppearTimer); badStateAppearTimer = null; }
 }
 
+// Arms the needs-fix modal after a debounce (the flag can flicker for one
+// loop tick during a normal human move). No-op while a game-end modal is up.
+function scheduleNeedsFixAppear(): void {
+  if (needsFixAppearTimer || needsFixMinimized || activeScenario === "needs-fix") return;
+  needsFixAppearTimer = setTimeout(() => {
+    needsFixAppearTimer = null;
+    if (extNeedsFix && !extOutcome && !needsFixMinimized && activeScenario !== "needs-fix") {
+      setActiveScenario("needs-fix");
+      render();
+    }
+  }, needsFixDelayMs);
+}
+
+// Returns true when something visible changed (caller should re-render).
+function clearNeedsFix(): boolean {
+  if (needsFixAppearTimer) { clearTimeout(needsFixAppearTimer); needsFixAppearTimer = null; }
+  needsFixMinimized = false;
+  if (activeScenario === "needs-fix") {
+    activeScenario = null;
+    return true;
+  }
+  return false;
+}
+
 function scheduleWelcomeRevive(): void {
   if (welcomeReviveTimer) clearTimeout(welcomeReviveTimer);
-  if (welcomeRevivedOnce || extPlyCount > 0 || extAutoMode || extOutcome) return;
+  if (welcomeRevivedOnce || extPlyCount > 0 || extGameActive || extOutcome) return;
   welcomeReviveTimer = setTimeout(() => {
     welcomeReviveTimer = null;
-    if (!welcomeRevivedOnce && extPlyCount === 0 && !extAutoMode && !activeScenario && !extOutcome) {
+    if (!welcomeRevivedOnce && extPlyCount === 0 && !extGameActive && !activeScenario && !extOutcome) {
       welcomeRevivedOnce = true;
       setActiveScenario("welcome");
       render();
@@ -881,6 +947,7 @@ function getDiorama(scenario: Scenario, size: number, color: string): HTMLElemen
     case "welcome":       return dioramaWelcome(size, color);
     case "first-capture": return dioramaFirstCapture(size);
     case "bad-state":     return dioramaBadState(size, color);
+    case "needs-fix":     return dioramaBadState(size, color);
     case "won":           return dioramaWon(size, color);
     case "lost":          return dioramaLost(size, color);
     case "draw":          return dioramaDraw(size, color);
@@ -1014,6 +1081,10 @@ function buildActions(scenario: Scenario, onDismissOrMinimize: () => void): HTML
       addBtn("Wipe state", true, () => { cbs?.onWipe(); onDismissOrMinimize(); });
       addBtn("Not now", false, onDismissOrMinimize);
       break;
+    case "needs-fix":
+      addBtn("OK — I fixed it", true, onDismissOrMinimize);
+      addBtn("Wipe state", false, () => { cbs?.onWipe(); onDismissOrMinimize(); });
+      break;
     case "won":
     case "lost":
     case "draw":
@@ -1027,61 +1098,73 @@ function buildActions(scenario: Scenario, onDismissOrMinimize: () => void): HTML
   return added > 0 ? row : null;
 }
 
-// ── Welcome AUTO control ───────────────────────────────────────────────────
+// ── Welcome start-game control ─────────────────────────────────────────────
 
-function buildWelcomeAutoControl(): HTMLElement {
+function buildWelcomeStartControl(): HTMLElement {
+  // A game may already be running (started from the top bar / another client).
+  if (extGameActive) welcomeStarted = true;
   const wrap = h("div", { display: "flex", alignItems: "center", gap: "18px", marginTop: "24px", flexWrap: "wrap", pointerEvents: "auto" });
 
   const btn = document.createElement("button");
+  btn.className = "welcome-start-btn";
   btn.style.cssText = `
     display:inline-flex;align-items:center;gap:12px;
-    padding:0 20px;height:52px;
+    padding:0 24px;height:52px;
     background:var(--accent);color:#0e0f10;
     border:none;cursor:pointer;
     font-family:var(--font-display);font-size:18px;font-weight:600;
     letter-spacing:0.04em;transition:background 200ms;
   `;
-
-  const box = document.createElement("span");
-  box.className = "auto-cb-box";
-  box.style.cssText = `
-    display:inline-grid;place-items:center;
-    width:22px;height:22px;
-    border:2px solid #0e0f10;
-    color:var(--accent);font-family:var(--font-mono);
-    font-size:16px;font-weight:700;line-height:1;
-  `;
-
-  const updateBtn = () => {
-    box.style.background = welcomeAutoOn ? "#0e0f10" : "transparent";
-    box.textContent = welcomeAutoOn ? "\u2713" : "";
-  };
-  updateBtn();
-  btn.appendChild(box);
-  btn.appendChild(document.createTextNode("Turn AUTO on"));
-
+  btn.textContent = welcomeStarted ? "\u2713 Game on" : "\u25b6 Start game";
+  btn.disabled = welcomeStarted;
   btn.addEventListener("click", () => {
-    const next = !welcomeAutoOn;
-    welcomeAutoOn = next;
-    updateBtn();
-    const msg = wrap.querySelector(".auto-ready-msg") as HTMLElement | null;
-    if (msg) {
-      msg.style.display = next ? "flex" : "none";
-      if (next) msg.style.animation = "cp-fade-in 220ms ease-out";
-    }
-    void (next ? cbs?.onAutoEnable() : cbs?.onAutoDisable());
+    if (welcomeStarted) return;
+    welcomeStarted = true;
+    extGameActive = true; // presumptive; the next snapshot corrects on failure
+    updateWelcomeStartVisuals();
+    void cbs?.onStartGame();
   });
   wrap.appendChild(btn);
 
   const msg = h("span", {
-    display: welcomeAutoOn ? "flex" : "none",
+    display: welcomeStarted ? "flex" : "none",
     fontFamily: "var(--font-display)", fontSize: "18px", fontWeight: "500",
     color: "var(--accent)", lineHeight: "1.3", maxWidth: "320px",
   }, "Now \u2014 make a move!");
-  msg.className = "auto-ready-msg";
+  msg.className = "start-ready-msg";
   wrap.appendChild(msg);
 
+  // Kiosk extra: nobody up for a game? Garry happily plays both sides.
+  // (Only offered before a game starts — VS_SELF is only reachable from START.)
+  if (!welcomeStarted) {
+    const selfPlay = document.createElement("button");
+    selfPlay.className = "btn btn-ghost";
+    selfPlay.style.cssText = "height:40px;font-size:13px;padding:0 14px;cursor:pointer;";
+    selfPlay.textContent = "or let me play myself";
+    selfPlay.addEventListener("click", () => {
+      void cbs?.onStartSelfPlay();
+      doWelcomeDismiss(true);
+      render();
+    });
+    wrap.appendChild(selfPlay);
+  }
+
   return wrap;
+}
+
+// Flips the welcome modal's start button + ready message to the started state
+// without a full re-render (root.innerHTML="" causes a visible flash).
+function updateWelcomeStartVisuals(): void {
+  const btn = document.querySelector<HTMLButtonElement>("#companion-root .welcome-start-btn");
+  const msg = document.querySelector<HTMLElement>("#companion-root .start-ready-msg");
+  if (btn) {
+    btn.textContent = "\u2713 Game on";
+    btn.disabled = true;
+  }
+  if (msg) {
+    msg.style.display = "flex";
+    msg.style.animation = "cp-fade-in 220ms ease-out";
+  }
 }
 
 // ── Takeover modal ─────────────────────────────────────────────────────────
@@ -1104,6 +1187,10 @@ function buildTakeover(scenario: Scenario): HTMLElement {
   const handleDismiss = () => {
     if (scenario === "bad-state") {
       badStateMinimized = true;
+      activeScenario = null;
+    } else if (scenario === "needs-fix") {
+      // Stays minimized until the server clears needs_fix (or a reset).
+      needsFixMinimized = true;
       activeScenario = null;
     } else if (scenario === "won" || scenario === "lost" || scenario === "draw") {
       gameEndDismissed = true;
@@ -1219,7 +1306,7 @@ function buildTakeover(scenario: Scenario): HTMLElement {
   }
 
   if (scenario === "bad-state") rightPanel.appendChild(buildStartPosDiagram());
-  if (scenario === "welcome")   rightPanel.appendChild(buildWelcomeAutoControl());
+  if (scenario === "welcome")   rightPanel.appendChild(buildWelcomeStartControl());
 
   const actions = buildActions(scenario, handleDismiss);
   if (actions) rightPanel.appendChild(actions);

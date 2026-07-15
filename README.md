@@ -92,8 +92,8 @@ There are three ways to drive the robot once it's configured:
 
 - **Web app.** This module ships a single-machine [Viam application](https://chess-control_viam-labs.viamapplications.com/),
   `chess-control`, for playing from the browser — board
-  view, move buttons, eval bar, and difficulty control. It appears in the Viam
-  app once the module is installed. Source: [`viamapp/`](viamapp/).
+  view, mode control, move buttons, eval bar, and difficulty control. It
+  appears in the Viam app once the module is installed. Source: [`viamapp/`](viamapp/).
 - **`DoCommand`.** Send commands directly to the `chess` service from any Viam
   SDK or the app's CONTROL tab. This is the underlying API the other methods use — see
   the [Command reference](#command-reference).
@@ -101,8 +101,28 @@ There are three ways to drive the robot once it's configured:
   that wraps the same commands for quick terminal testing, e.g.
   `./chesscli -host <machine> -cmd go -n 1`. This is recommended for development.
 
-A typical loop: you move a piece, then send `{"go": 1}` and the robot detects
-your move, replies, and moves its piece.
+A typical loop: start a game (`{"mode": 2}` or the web app's *Play vs Garry*),
+move a piece on the board, and the background loop detects your move and
+replies on its own.
+
+### Modes
+
+The service runs a 6-mode state machine (the transition table in
+[`mode.go`](mode.go) is authoritative):
+
+| mode | name | behavior |
+| --- | --- | --- |
+| 0 | `START` | Boot/entry hub. No game — any saved game is wiped each tick. Choose an opponent to begin. |
+| 1 | `IDLE` | Active game suspended (paused) or finished (`game_over`). Loop is passive; manual commands work. |
+| 2 | `VS_HUMAN` | Robot plays black. The loop detects human plies via the camera and replies automatically. |
+| 3 | `VS_SELF` | Robot plays both sides, one ply per tick. |
+| 4 | `TEACHING` | Stub — transitions work, no behavior yet. Only reachable from `VS_HUMAN`. |
+| 5 | `ERROR` | Entered on an arm/gripper/engine fault. Loop halts, arm homes. Resume (game intact) or reset with `{"mode": 0}`; the physical `{"reset": true}` is rejected here. |
+
+Game over parks the machine in `IDLE` with `game_over: true` (resume
+disabled — reset to play again). A board that can't be matched to the game in
+`VS_HUMAN` raises `needs_fix` in the snapshot and waits for a human; it never
+faults.
 
 ## Configuration reference
 
@@ -209,13 +229,15 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 | --- | --- | --- |
 | `move` | `{"from": "<sq>", "to": "<sq>", "n": <int>}` | Physically pick up the piece at `from` and place it at `to`. Repeats `n` times, alternating direction each iteration (so `n=2` ends back where it started). Captures are recorded in the graveyard. |
 | `go` | `<int>` | Let the engine play this many moves and execute them physically. Returns the last move's UCI string. |
-| `reset` | `true` | Return every piece to its initial-game home square, including pulling captured pieces back from the graveyard and restoring the spare queen to slot 0 if a promotion happened. |
+| `reset` | `true` | Return every piece to its initial-game home square, including pulling captured pieces back from the graveyard and restoring the spare queen to slot 0 if a promotion happened. Lands in `START`; rejected in `ERROR` (use `{"mode": 0}` there). |
 | `undo` | `<int>` | Physically undo the last N moves (newest-first), restoring captured pieces from the graveyard. Errors if any of the undone moves is a promotion. |
 | `wipe` | `true` | Clear saved game state and the cached square positions. |
 | `clear-cache` | `true` | Clear only the square-position cache (forces re-scan from the next pointcloud capture). Use after physically nudging the board. |
 | `difficulty` | `<int>` | Change engine strength at runtime to a target Elo. See [Engine strength](#engine-strength). Returns `{"difficulty": <applied-elo>}`. |
 | `hover` | `"<sq>"` | Move the gripper to ~100 mm above the given square's pickup point and stay there. Does not return home. |
-| `auto` | `true` / `false` | Enable/disable the engine's automatic reply in the background board loop (detection and cache refresh still run when off). Returns `{"auto": <bool>}`. |
+| `mode` | `<int 0–5>` | Request a mode transition — see [Modes](#modes). Validated against the transition table; illegal edges return an error. Lock-free, so a pause acks instantly even mid-arm-move. |
+| `mode-status` | `true` | Lock-free read of the full machine state: `mode`, `mode_name`, `idle_origin`, `err_prev_mode`, `game_over`, `needs_fix`. |
+| `auto` | `true` / `false` | Legacy shim, kept for old clients: maps onto mode transitions (`true` → start/resume `VS_HUMAN`, `false` → pause). Prefer `mode`. Returns `{"auto": <bool>}`. |
 | `set-announce` | `true` / `false` | Enable/disable dispatching `move_made` events to `on_move_target`. Returns `{"announce": <bool>}`. |
 | `play-fen` | `"<path>"` | Wipe state, then replay every move from a PGN file at the given path. |
 | `board-snapshot` | `true` | Return the current board state — see [Snapshot fields](#snapshot-fields). Served from a cache when the board loop is running. |
@@ -231,7 +253,10 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 | `fen` | the engine's current position in FEN |
 | `camera_board` | what the camera currently sees per square |
 | `white_graveyard` / `black_graveyard` | FEN-letter contents of each graveyard |
-| `auto` | whether the engine auto-reply is enabled |
+| `mode` | current machine mode (0–5) — also included in every other command's response |
+| `auto` | legacy compat: true iff mode is `VS_HUMAN` |
+| `game_over` | the active game has ended (machine parked in `IDLE`, resume disabled) |
+| `needs_fix` | the board can't be matched to the game — a human must fix the pieces |
 | `captured_at_ms` | capture time (Unix ms) |
 | `event` | highest-priority active event: `checkmate`, `stalemate`, `draw`, `check`, or `none` |
 | `outcome` | `in_progress`, `white_won`, `black_won`, or `draw` |
@@ -251,7 +276,8 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 {"reset": true}
 {"undo": 2}
 {"difficulty": 1800}
-{"auto": true}
+{"mode": 2}
+{"mode-status": true}
 {"play-fen": "data/sample.pgn"}
 {"board-snapshot": true}
 ```
