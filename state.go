@@ -65,6 +65,35 @@ func readState(ctx context.Context, fn string) (*state, error) {
 	return &state{game: chess.NewGame(f), whiteGraveyard: ss.WhiteGraveyard, blackGraveyard: ss.BlackGraveyard}, nil
 }
 
+// parseFENPiece maps a FEN piece letter (uppercase white, lowercase black) to
+// its chess.Piece. Kings are excluded — they can't be captured, so they never
+// belong in a graveyard.
+func parseFENPiece(s string) (chess.Piece, bool) {
+	switch s {
+	case "P":
+		return chess.WhitePawn, true
+	case "N":
+		return chess.WhiteKnight, true
+	case "B":
+		return chess.WhiteBishop, true
+	case "R":
+		return chess.WhiteRook, true
+	case "Q":
+		return chess.WhiteQueen, true
+	case "p":
+		return chess.BlackPawn, true
+	case "n":
+		return chess.BlackKnight, true
+	case "b":
+		return chess.BlackBishop, true
+	case "r":
+		return chess.BlackRook, true
+	case "q":
+		return chess.BlackQueen, true
+	}
+	return chess.NoPiece, false
+}
+
 func pieceIntToFEN(p int) string {
 	piece := chess.Piece(p)
 	if piece == chess.NoPiece {

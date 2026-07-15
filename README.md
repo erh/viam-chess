@@ -238,6 +238,7 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 | `reset` | `true` | Return every piece to its initial-game home square, including pulling captured pieces back from the graveyard and restoring the spare queen to slot 0 if a promotion happened. Lands in `START`; rejected in `ERROR` (use `{"mode": 0}` there). |
 | `undo` | `<int>` | Physically undo the last N moves (newest-first), restoring captured pieces from the graveyard. Errors if any of the undone moves is a promotion. |
 | `wipe` | `true` | Clear saved game state and the cached square positions. |
+| `set-board` | `{"fen": "<fen>", "white_graveyard": ["<piece>", …], "black_graveyard": ["<piece>", …]}` | Overwrite the saved game state (FEN + graveyards, pieces as FEN letters) without moving the arm — the recovery path for state/board drift: fix the physical board by hand, then sync the game to match. Rejected in `START` (the saved game is wiped every tick there) and `VS_SELF`; allowed in `ERROR`, where restoring an intact state is what re-enables resume. |
 | `clear-cache` | `true` | Clear only the square-position cache (forces re-scan from the next pointcloud capture). Use after physically nudging the board. |
 | `difficulty` | `<int>` | Change engine strength at runtime to a target Elo. See [Engine strength](#engine-strength). Returns `{"difficulty": <applied-elo>}`. |
 | `hover` | `"<sq>"` | Move the gripper to ~100 mm above the given square's pickup point and stay there. Does not return home. |
