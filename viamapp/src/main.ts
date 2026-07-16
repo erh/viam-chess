@@ -320,13 +320,20 @@ async function refreshModeStatus() {
   }
 }
 
+// True while a {mode:N} command is awaiting its response. Mode/banner buttons
+// are disabled for the duration — a second click would send a transition
+// that's illegal from the mode the first click just moved us to.
+let modeCmdInFlight = false;
+
 async function setModeOnServer(mode: number): Promise<boolean> {
+  if (modeCmdInFlight) return false; // double-click while the first is pending
+  modeCmdInFlight = true;
+  renderModePanel(); // disable the buttons immediately
   try {
     // The command's own response applies the new mode (doCommand); then mute
     // snapshot-derived mode updates briefly — see doCommand.
     await doCommand({ mode });
     modeSnapshotMuteUntil = Date.now() + 2_000;
-    renderModePanel();
     return true;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -334,6 +341,9 @@ async function setModeOnServer(mode: number): Promise<boolean> {
     // The transition was rejected — our mirror may be stale; resync.
     void refreshState();
     return false;
+  } finally {
+    modeCmdInFlight = false;
+    renderModePanel();
   }
 }
 
@@ -461,7 +471,7 @@ function renderModePanel() {
       const btn = document.createElement("button");
       btn.className = "btn btn-sm" + (action.accent ? " btn-accent" : "") + (action.danger ? " danger" : "");
       btn.textContent = action.label;
-      btn.disabled = busy;
+      btn.disabled = busy || modeCmdInFlight;
       btn.addEventListener("click", action.run);
       actionsEl.appendChild(btn);
     }
@@ -498,6 +508,11 @@ function applyCommandAvailability() {
   if (resetBtn) {
     resetBtn.disabled = busy || currentMode === MODE_ERROR;
     resetBtn.title = currentMode === MODE_ERROR ? "physical reset is disabled while faulted — use Reset state" : "";
+  }
+  // Banner buttons issue mode commands too — same double-click guard.
+  for (const id of ["btn-error-resume", "btn-error-reset"]) {
+    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    if (btn) btn.disabled = busy || modeCmdInFlight;
   }
 }
 
