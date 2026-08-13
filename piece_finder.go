@@ -51,7 +51,10 @@ type classifyConfig struct {
 	SquareInset float64
 
 	// OtsuSeparationThreshold is the minimum between-class mean separation
-	// required by the 2D Otsu classifier to declare a piece present.
+	// required by the 2D Otsu classifier to declare a piece present. Empty
+	// squares still produce a weak bimodal split from lighting gradients
+	// (separation ~26), while the faintest real pieces separate by ~32, so the
+	// default sits between them.
 	OtsuSeparationThreshold float64
 
 	// ColorDivergenceGuard is the maximum tolerated per-channel average
@@ -76,7 +79,7 @@ func defaultClassifyConfig() classifyConfig {
 	return classifyConfig{
 		MinPieceSize:            25.0,
 		SquareInset:             10.0,
-		OtsuSeparationThreshold: 25.0,
+		OtsuSeparationThreshold: 29.0,
 		ColorDivergenceGuard:    60.0,
 		MinTopFootprintMM:       5.0,
 		BrightnessThreshold:     128.0,
@@ -96,7 +99,7 @@ type PieceFinderConfig struct {
 
 	MinPieceSize            float64 `json:"min-piece-size"`            // default 25.0 mm
 	SquareInset             float64 `json:"square-inset"`              // default 10.0 px
-	OtsuSeparationThreshold float64 `json:"otsu-separation-threshold"` // default 25.0
+	OtsuSeparationThreshold float64 `json:"otsu-separation-threshold"` // default 29.0
 	ColorDivergenceGuard    float64 `json:"color-divergence-guard"`    // default 60.0
 	MinTopFootprintMM       float64 `json:"min-top-footprint-mm"`      // default 5.0 mm
 	BrightnessThreshold     float64 `json:"brightness-threshold"`      // default 128.0 (mean RGB)
@@ -515,7 +518,7 @@ func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Re
 
 	// pc-attached colors disagree with srcImg pixels → bad depth/RGB alignment.
 	if d3x.TopColoredCount > 0 && d3x.TopColorDivergence > cc.ColorDivergenceGuard {
-		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
+		return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold, cc.BrightnessThreshold).Color
 	}
 
 	if d3x.TopColoredCount > 5 {
@@ -530,7 +533,12 @@ func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Re
 		if d3x.BoardColoredCount > 10 {
 			boardBr := (d3x.BoardMeanAttachedR + d3x.BoardMeanAttachedG + d3x.BoardMeanAttachedB) / 3.0
 			diff := pieceBr - boardBr
-			if diff > clearWhiteDiff {
+			// A piece brighter than its board square is white only if it's also
+			// bright in absolute terms (bright, cool sets) or warm (cream). Black
+			// plastic on an unusually dark square (e.g. a dark-green square) also
+			// clears the relative diff, but is dim and cool — let it fall through
+			// to the warmth test below instead of short-circuiting to white.
+			if diff > clearWhiteDiff && (pieceBr > absoluteWhiteCutoff || pieceWarmth > warmthCutoff) {
 				return 1
 			}
 			if diff < clearBlackDiff {
@@ -550,7 +558,7 @@ func classifyPieceColor(pc pointcloud.PointCloud, img image.Image, rect image.Re
 	// Depth can wholly miss glossy/low-texture pieces while still capturing the
 	// surrounding board, so total_count alone can't rule out a piece. 2D Otsu
 	// returns 0 for uniform rects.
-	return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold).Color
+	return colorFromImage2D(img, rect, cc.OtsuSeparationThreshold, cc.BrightnessThreshold).Color
 }
 
 func (d pcDiag3DExtra) asMap() map[string]interface{} {
@@ -772,7 +780,7 @@ func (d colorDiag2D) asMap() map[string]interface{} {
 
 // colorFromImage2D runs Otsu's threshold on the 2D image region and returns
 // all intermediate values alongside the classification (0 empty, 1 white, 2 black).
-func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh float64) colorDiag2D {
+func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh, brightnessThreshold float64) colorDiag2D {
 	var hist [256]int
 	total := 0
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
@@ -861,6 +869,14 @@ func colorFromImage2D(img image.Image, rect image.Rectangle, otsuSepThresh float
 	if cntDark < cntLight {
 		diag.Color = 2
 	} else {
+		diag.Color = 1
+	}
+	// The board-relative rule above labels the piece by whether it's the darker
+	// or lighter class, which flips on a white piece sitting on an even brighter
+	// (glare-lit) light square: the piece becomes the minority *dark* class and
+	// is mislabelled black. Trust absolute brightness as a tiebreak — a "black"
+	// verdict whose own (dark-class) pixels are actually bright is a light piece.
+	if diag.Color == 2 && diag.MeanDark >= brightnessThreshold {
 		diag.Color = 1
 	}
 	return diag
@@ -975,7 +991,7 @@ func (bc *PieceFinder) diagnose(ctx context.Context, filter string, samples int,
 		if filter != "" && b.name != filter {
 			continue
 		}
-		d2 := colorFromImage2D(img, b.bounds, cc.OtsuSeparationThreshold)
+		d2 := colorFromImage2D(img, b.bounds, cc.OtsuSeparationThreshold, cc.BrightnessThreshold)
 		d3x := pcDiagnose3D(b.pc, img, bc.props, samples, cc.MinPieceSize)
 		rejectReason := d3x.rejectReason(cc.ColorDivergenceGuard, cc.MinTopFootprintMM)
 		// Call the production classifier so the diagnostic mirrors the real
