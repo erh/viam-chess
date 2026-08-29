@@ -13,7 +13,7 @@ interface MachineCookie {
   machineName?: string;
 }
 
-type EvtType = "go" | "undo" | "reset" | "wipe" | "cache" | "refresh" | "snapshot" | "err";
+type EvtType = "go" | "undo" | "reset" | "wipe" | "cache" | "refresh" | "snapshot" | "err" | "mode";
 interface MoveEntry {
   kind: "move";
   i: number;
@@ -83,7 +83,14 @@ let initialLoaded = false;
 // still update camera/mismatches, but not the board — otherwise a stale server
 // FEN reverts the move in the UI while the camera already shows the new position.
 // Robot `go` / `wipe` / `reset` flip this back to true so the server drives state.
+// In VS_HUMAN the hand-back is snapshot-driven instead (see pendingMovePly).
 let serverAuthoritative = true;
+
+// VS_HUMAN drag-move flow: the UI only actuates the arm ({move}); the server's
+// board loop registers the ply and replies, exactly as if the human had moved
+// the piece by hand. This holds the target ply count until the server catches
+// up, at which point snapshots become authoritative again.
+let pendingMovePly: number | null = null;
 
 // After cmdUndo runs, the next FEN diff will look like a piece moving back to
 // its source square. This flag tells applySnapshot to ignore that one inference
@@ -98,9 +105,30 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let refreshInFlight = false;
 let busy = false;
 
-// Auto-mode is now server-side. We mirror the toggle locally just for the
-// checkbox UI; the truth comes from board-snapshot's `auto` field.
-let autoMode = false;
+// The robot runs a 6-mode state machine (mode.go); every DoCommand response
+// carries the current mode and board-snapshot adds game_over/needs_fix. We
+// mirror them locally to drive the mode control, gate gameplay commands, and
+// show the fault banner. The server is always the source of truth.
+const MODE_START = 0;
+const MODE_IDLE = 1;
+const MODE_VS_HUMAN = 2;
+const MODE_VS_SELF = 3;
+const MODE_TEACHING = 4;
+const MODE_ERROR = 5;
+const MODE_NAMES = ["START", "IDLE", "VS_HUMAN", "VS_SELF", "TEACHING", "ERROR"];
+
+let currentMode = MODE_START;
+let modeKnown = false; // false until the first server response carries a mode
+let gameOver = false;
+let needsFix = false;
+// Populated from {"mode-status": true} when we observe IDLE/ERROR, so Resume
+// knows its target. 0 (START) means "unknown" — START is never a resume target.
+let idleOrigin = 0;
+let errPrevMode = 0;
+
+function gameActive(): boolean {
+  return currentMode === MODE_VS_HUMAN || currentMode === MODE_VS_SELF || currentMode === MODE_TEACHING;
+}
 // Active vs idle snapshot cadence. Snapshot reads from a server-side cache
 // (no per-call camera capture), so this is purely about UI freshness.
 const ACTIVE_REFRESH_MS = 500;
@@ -247,7 +275,85 @@ async function resolveMachineLink(el: HTMLAnchorElement | null) {
 async function doCommand(cmd: Record<string, unknown>): Promise<Record<string, JsonValue>> {
   if (!chessService) throw new Error("Not connected");
   const result = await chessService.doCommand(Struct.fromJson(cmd as JsonValue));
-  return (result ?? {}) as Record<string, JsonValue>;
+  const res = (result ?? {}) as Record<string, JsonValue>;
+  // Every DoCommand success payload carries the current mode — keep ours fresh.
+  // The mute window keeps a poll that was already in flight when an explicit
+  // mode command landed from briefly reverting the fresher mode.
+  if (typeof res.mode === "number" && Date.now() >= modeSnapshotMuteUntil) {
+    updateMode(res.mode);
+  }
+  return res;
+}
+
+let modeSnapshotMuteUntil = 0;
+
+// ── Mode machine mirror ────────────────────────────────────────────────────
+
+function updateMode(mode: number) {
+  if (modeKnown && mode === currentMode) return;
+  const first = !modeKnown;
+  const prev = currentMode;
+  currentMode = mode;
+  modeKnown = true;
+  if (!first && mode !== prev) {
+    pushEvent("mode", `${MODE_NAMES[prev] ?? prev} → ${MODE_NAMES[mode] ?? mode}`);
+  }
+  // IDLE/ERROR need resume targets we can only get from mode-status.
+  if (mode === MODE_IDLE || mode === MODE_ERROR) void refreshModeStatus();
+  renderModePanel();
+}
+
+let modeStatusInFlight = false;
+async function refreshModeStatus() {
+  if (modeStatusInFlight || !chessService) return;
+  modeStatusInFlight = true;
+  try {
+    const res = await doCommand({ "mode-status": true });
+    if (typeof res.idle_origin === "number") idleOrigin = res.idle_origin;
+    if (typeof res.err_prev_mode === "number") errPrevMode = res.err_prev_mode;
+    if (typeof res.game_over === "boolean") gameOver = res.game_over;
+    renderModePanel();
+  } catch (e) {
+    console.warn("mode-status failed", e);
+  } finally {
+    modeStatusInFlight = false;
+  }
+}
+
+async function setModeOnServer(mode: number): Promise<boolean> {
+  try {
+    // The command's own response applies the new mode (doCommand); then mute
+    // snapshot-derived mode updates briefly — see doCommand.
+    await doCommand({ mode });
+    modeSnapshotMuteUntil = Date.now() + 2_000;
+    renderModePanel();
+    return true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    pushEvent("err", `mode → ${MODE_NAMES[mode] ?? mode}: ${msg}`);
+    // The transition was rejected — our mirror may be stale; resync.
+    void refreshState();
+    return false;
+  }
+}
+
+// Blocks gameplay commands (go/move/undo) in states where they'd fail or be
+// destructive; optionally auto-starts a VS_HUMAN game from START (the boot
+// state wipes any saved game every tick, so playing there would be silently
+// lost). Returns a user-facing reason when blocked, null when clear to play.
+async function ensurePlayable(autoStart = true): Promise<string | null> {
+  if (currentMode === MODE_ERROR) {
+    return "robot fault — resume or reset first (see banner)";
+  }
+  if (gameOver) {
+    return "game over — reset the board to play again";
+  }
+  if (currentMode === MODE_START) {
+    if (!autoStart) return "no active game";
+    if (!(await setModeOnServer(MODE_VS_HUMAN))) return "couldn't start a game";
+    companion.onGameStarted();
+  }
+  return null;
 }
 
 // ── Status pill ────────────────────────────────────────────────────────────
@@ -263,9 +369,147 @@ function setStatus(label: string, level: "ok" | "warn" | "err") {
 }
 
 function updateStatusFromMismatches() {
+  if (currentMode === MODE_ERROR) {
+    setStatus("fault", "err");
+    return;
+  }
+  if (needsFix) {
+    setStatus("fix board", "warn");
+    return;
+  }
   const suffix = idleMode ? " · idle" : "";
   if (mismatches.length === 0) setStatus("in sync" + suffix, "ok");
   else setStatus(`${mismatches.length} diff${suffix}`, "warn");
+}
+
+// ── Mode control (top bar) + fault banner ──────────────────────────────────
+
+interface ModeAction {
+  label: string;
+  accent?: boolean;
+  danger?: boolean;
+  run: () => void;
+}
+
+function modeChipState(): { label: string; cls: string } {
+  if (!modeKnown) return { label: "—", cls: "" };
+  switch (currentMode) {
+    case MODE_START: return { label: "no game", cls: "" };
+    case MODE_IDLE: return gameOver
+      ? { label: "game over", cls: "attention" }
+      : { label: "paused", cls: "attention" };
+    case MODE_VS_HUMAN: return { label: "vs human", cls: "playing" };
+    case MODE_VS_SELF: return { label: "self-play", cls: "playing" };
+    case MODE_TEACHING: return { label: "teaching", cls: "playing" };
+    case MODE_ERROR: return { label: "fault", cls: "fault" };
+    default: return { label: `mode ${currentMode}`, cls: "" };
+  }
+}
+
+function modeActions(): ModeAction[] {
+  if (!modeKnown) return [];
+  const to = (mode: number) => () => void setModeOnServer(mode);
+  switch (currentMode) {
+    case MODE_START:
+      return [
+        { label: "▶ Play vs Garry", accent: true, run: () => { void setModeOnServer(MODE_VS_HUMAN).then((ok) => { if (ok) companion.onGameStarted(); }); } },
+        { label: "Self-play", run: () => { void setModeOnServer(MODE_VS_SELF).then((ok) => { if (ok) companion.onGameStarted(); }); } },
+      ];
+    case MODE_VS_HUMAN:
+      return [
+        { label: "⏸ Pause", run: to(MODE_IDLE) },
+        { label: "Teach", run: to(MODE_TEACHING) },
+      ];
+    case MODE_VS_SELF:
+      return [{ label: "⏸ Pause", run: to(MODE_IDLE) }];
+    case MODE_TEACHING:
+      return [
+        { label: "▶ Back to game", accent: true, run: to(MODE_VS_HUMAN) },
+        { label: "⏸ Pause", run: to(MODE_IDLE) },
+      ];
+    case MODE_IDLE:
+      if (gameOver) {
+        return [
+          { label: "Reset board", danger: true, run: () => void cmdMaintenance("reset") },
+          { label: "New game", run: to(MODE_START) },
+        ];
+      }
+      return [
+        // idleOrigin is 0 until mode-status answers; VS_HUMAN is the only
+        // origin reachable from this UI anyway, so it's a safe fallback.
+        { label: "▶ Resume", accent: true, run: to(idleOrigin || MODE_VS_HUMAN) },
+        { label: "End game", danger: true, run: to(MODE_START) },
+      ];
+    case MODE_ERROR:
+      return [{ label: "Reset state", danger: true, run: to(MODE_START) }];
+    default:
+      return [];
+  }
+}
+
+function renderModePanel() {
+  const chipEl = document.getElementById("mode-chip");
+  const actionsEl = document.getElementById("mode-actions");
+  if (chipEl) {
+    const { label, cls } = modeChipState();
+    chipEl.textContent = label;
+    chipEl.className = "mode-chip mono" + (cls ? " " + cls : "");
+  }
+  if (actionsEl) {
+    actionsEl.innerHTML = "";
+    for (const action of modeActions()) {
+      const btn = document.createElement("button");
+      btn.className = "btn btn-sm" + (action.accent ? " btn-accent" : "") + (action.danger ? " danger" : "");
+      btn.textContent = action.label;
+      btn.disabled = busy;
+      btn.addEventListener("click", action.run);
+      actionsEl.appendChild(btn);
+    }
+  }
+
+  // Fault banner
+  const banner = document.getElementById("error-banner");
+  if (banner) banner.classList.toggle("hidden", currentMode !== MODE_ERROR);
+  const resumeBtn = document.getElementById("btn-error-resume") as HTMLButtonElement | null;
+  if (resumeBtn) {
+    // Resume target comes from mode-status; hide until we know it. A fault in
+    // START has nowhere to resume to (errPrevMode 0) — reset is the only path.
+    resumeBtn.classList.toggle("hidden", errPrevMode === 0);
+  }
+
+  applyCommandAvailability();
+  updateStatusFromMismatches();
+}
+
+// Gameplay commands are unavailable in ERROR and after game over; the physical
+// board reset is rejected by the server in ERROR (arm may be unsafe).
+function applyCommandAvailability() {
+  const gameplayBlocked = currentMode === MODE_ERROR || gameOver;
+  const gameplayTitle =
+    currentMode === MODE_ERROR ? "robot fault — recover first" :
+    gameOver ? "game over — reset the board to play again" : "";
+  for (const id of ["btn-go", "btn-move", "btn-undo"]) {
+    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    if (!btn) continue;
+    btn.disabled = busy || gameplayBlocked;
+    btn.title = gameplayTitle || (id === "btn-undo" ? "Undo last ply" : "");
+  }
+  const resetBtn = document.getElementById("btn-reset") as HTMLButtonElement | null;
+  if (resetBtn) {
+    resetBtn.disabled = busy || currentMode === MODE_ERROR;
+    resetBtn.title = currentMode === MODE_ERROR ? "physical reset is disabled while faulted — use Reset state" : "";
+  }
+  // set-board is only rejected by the server in START (its tick wipes the
+  // saved game) and VS_SELF; it stays available in ERROR, where repairing the
+  // saved state is what re-enables resume.
+  const setBoardBlocked = modeKnown && (currentMode === MODE_START || currentMode === MODE_VS_SELF);
+  const setBoardBtn = document.getElementById("btn-set-fen") as HTMLButtonElement | null;
+  if (setBoardBtn) {
+    setBoardBtn.disabled = busy || setBoardBlocked;
+    setBoardBtn.title = !setBoardBlocked ? "" :
+      currentMode === MODE_START ? "no game to edit — START wipes the saved state; start a game first" :
+      "not available during self-play — pause first";
+  }
 }
 
 // ── Eval bar ───────────────────────────────────────────────────────────────
@@ -623,15 +867,38 @@ const STARTING_PLACEMENT = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
 function applySnapshot(res: Record<string, JsonValue>) {
   let inferredExternal: { from: string; to: string } | null = null;
   let observedReset = false;
+
+  // Mode-machine fields. (mode itself is already applied by doCommand.)
+  if (typeof res.game_over === "boolean" && res.game_over !== gameOver) {
+    gameOver = res.game_over;
+    renderModePanel();
+  }
+  if (typeof res.needs_fix === "boolean") needsFix = res.needs_fix;
+
+  // VS_HUMAN drag-move: hand board authority back once the server has
+  // registered our ply (FEN caught up) or told us the board needs fixing
+  // (registration failed — show the real server state + mismatches).
+  if (!serverAuthoritative && pendingMovePly !== null && typeof res.fen === "string") {
+    if (plyCountFromFEN(res.fen) >= pendingMovePly || needsFix) {
+      serverAuthoritative = true;
+      pendingMovePly = null;
+    }
+  }
+
+  let fenChanged = false;
   if (serverAuthoritative) {
     if (typeof res.fen === "string") {
       const prevFen = currentFen;
       currentFen = res.fen;
       const { board, turn } = parseFENPlacement(currentFen);
-      const prevBoard = prevFen ? parseFENPlacement(prevFen).board : null;
+      // Diff against the board as last rendered (not as last received): after
+      // an optimistic drag move in VS_HUMAN, currentBoard already holds the
+      // human ply, so the robot's reply still resolves to a single-move diff.
+      const prevBoard = prevFen ? currentBoard.map((row) => [...row]) : null;
       currentBoard = board;
       currentTurn = turn;
       if (prevFen && prevFen !== currentFen) {
+        fenChanged = true;
         console.debug("[fen]", prevFen, "→", currentFen);
         const prevPlacement = prevFen.split(" ")[0];
         const currPlacement = currentFen.split(" ")[0];
@@ -657,11 +924,6 @@ function applySnapshot(res: Record<string, JsonValue>) {
     if (initialLoaded && prevBlackGraveyardLen === 0 && blackGraveyard.length > 0) {
       companion.onFirstCapture();
     }
-  }
-  if (typeof res.auto === "boolean" && res.auto !== autoMode) {
-    autoMode = res.auto;
-    const cb = document.getElementById("auto-mode") as HTMLInputElement | null;
-    if (cb) cb.checked = autoMode;
   }
   cameraBoard =
     res.camera_board && typeof res.camera_board === "object"
@@ -702,17 +964,19 @@ function applySnapshot(res: Record<string, JsonValue>) {
   } else if (inferredExternal) {
     pushMoveToTape(inferredExternal.from, inferredExternal.to, `${inferredExternal.from}${inferredExternal.to}`);
     pushEvent("go", "inferred from fen diff");
-    if (idleMode) setIdle(false);
   }
+  // Any externally-advancing game (VS_SELF, another client, the board loop
+  // replying) should keep the UI awake even without local user activity.
+  if (fenChanged && idleMode) setIdle(false);
 
   if (!initialLoaded) {
-    companion.onInit(fenPly, autoMode, mismatches.length, snapshotOutcome, snapshotInCheck);
+    companion.onInit(fenPly, gameActive(), mismatches.length, snapshotOutcome, snapshotInCheck, needsFix);
     initialLoaded = true;
     document.getElementById("board-loading")?.classList.add("hidden");
   } else if (observedReset) {
     companion.onReset();
   } else {
-    companion.onSnapshot(fenPly, autoMode, mismatches.length, snapshotOutcome, snapshotInCheck);
+    companion.onSnapshot(fenPly, gameActive(), mismatches.length, snapshotOutcome, snapshotInCheck, needsFix);
   }
 }
 
@@ -826,28 +1090,6 @@ function startAutoRefresh() {
   autoRefreshTimer = setInterval(refreshState, refreshPollMs);
 }
 
-// ── Auto mode toggle ───────────────────────────────────────────────────────
-// Server is authoritative; the client just sends a doCommand.
-
-async function setAutoModeOnServer(enabled: boolean): Promise<boolean> {
-  // Apply optimistically before the round-trip so UI never waits on the server.
-  autoMode = enabled;
-  const cb = document.getElementById("auto-mode") as HTMLInputElement | null;
-  if (cb) cb.checked = enabled;
-  companion.onAutoToggle(enabled);
-  if (chessService) {
-    // Pause snapshot polling so a stale server response can't revert the optimistic state.
-    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-    try {
-      await doCommand({ auto: enabled });
-    } finally {
-      startAutoRefresh();
-    }
-  }
-  pushEvent("go", `auto: ${enabled ? "on" : "off"}`);
-  return true;
-}
-
 // ── Idle mode ──────────────────────────────────────────────────────────────
 // After IDLE_THRESHOLD_MS without user activity, slow snapshot polling to
 // IDLE_POLL_MS. Wake on user input, an observed FEN change, or a reset event.
@@ -882,7 +1124,8 @@ function startIdleWatch() {
     document.addEventListener(evt, recordActivity, { passive: true });
   });
   setInterval(() => {
-    if (!idleMode && Date.now() - lastActivityAt > IDLE_THRESHOLD_MS) {
+    // Never idle during self-play — the game advances with nobody at the kiosk.
+    if (!idleMode && currentMode !== MODE_VS_SELF && Date.now() - lastActivityAt > IDLE_THRESHOLD_MS) {
       setIdle(true);
     }
   }, 10_000);
@@ -893,6 +1136,8 @@ function startIdleWatch() {
 function setBusy(next: boolean) {
   busy = next;
   document.querySelectorAll<HTMLButtonElement>("button").forEach((b) => (b.disabled = next));
+  // Re-applies the mode-based gating that the blanket re-enable above undoes.
+  if (!next) applyCommandAvailability();
 }
 
 async function withBusy(fn: () => Promise<void>) {
@@ -920,6 +1165,11 @@ function popLastMoveFromTape() {
 
 async function cmdUndo() {
   const n = 1;
+  const blocked = await ensurePlayable(false);
+  if (blocked) {
+    pushEvent("err", `undo: ${blocked}`);
+    return;
+  }
   serverAuthoritative = true;
   try {
     await withBusy(async () => {
@@ -938,6 +1188,11 @@ async function cmdUndo() {
 async function cmdGo() {
   dismissInlineError("go");
   const n = parseInt((document.getElementById("go-n") as HTMLInputElement).value, 10) || 1;
+  const blocked = await ensurePlayable();
+  if (blocked) {
+    showInlineError("go", blocked);
+    return;
+  }
   serverAuthoritative = true;
   try {
     await withBusy(async () => {
@@ -983,6 +1238,12 @@ async function submitMove(from: string, to: string) {
     showInlineError("move", `invalid square: ${from}→${to}`);
     return;
   }
+  // Gate on mode first (may auto-start a VS_HUMAN game from START).
+  const blocked = await ensurePlayable();
+  if (blocked) {
+    showInlineError("move", blocked);
+    return;
+  }
   // Snapshot for revert on failure.
   const prev = {
     board: currentBoard.map((row) => [...row]),
@@ -1001,10 +1262,16 @@ async function submitMove(from: string, to: string) {
   renderTopStatus();
   updateStatusFromMismatches();
 
-  // Between arm-move and engine-go, intermediate snapshots would see a stale
-  // server FEN (move is low-level; game state advances on the next `go`).
-  // Hold the UI as authoritative until `go` completes, then let server drive.
+  // Hold the UI as authoritative while the server's FEN is behind our
+  // optimistic move; the hand-back differs per mode (see below).
   serverAuthoritative = false;
+
+  // In VS_HUMAN the board loop watches the camera, registers any human ply,
+  // and replies as black on its own — sending {go} too would race it and can
+  // make the engine play *white's* move. So a UI move is just an arm
+  // actuation, exactly like moving the piece by hand; the loop does the rest
+  // and applySnapshot hands authority back once the FEN catches up.
+  const loopDriven = currentMode === MODE_VS_HUMAN;
 
   try {
     await withBusy(async () => {
@@ -1012,8 +1279,17 @@ async function submitMove(from: string, to: string) {
       await doCommand({ move: { from, to, n: 1 } });
       // White piece is now on the target square — dismiss companion welcome.
       companion.onMove(plyCount + 1);
-      // 2. `go 1` sanity-checks the camera, registers the human ply on the
-      //    server, then picks and plays the engine's response.
+
+      if (loopDriven) {
+        pendingMovePly = (currentFen ? plyCountFromFEN(currentFen) : plyCount) + 1;
+        pushMoveToTape(from, to, `${from}${to}`);
+        pushEvent("go", "arm moved — Garry will reply");
+        return;
+      }
+
+      // Manual modes (paused game / teaching): the loop is passive, so drive
+      // the game ourselves. `go 1` sanity-checks the camera, registers the
+      // human ply on the server, then picks and plays the engine's response.
       const goRes = await doCommand({ go: 1 });
       serverAuthoritative = true;
       pushMoveToTape(from, to, `${from}${to}`);
@@ -1029,6 +1305,7 @@ async function submitMove(from: string, to: string) {
     lastMove = prev.lastMove;
     mismatches = prev.mismatches;
     serverAuthoritative = true;
+    pendingMovePly = null;
     renderBoard();
     renderMaterial();
     renderTopStatus();
@@ -1067,6 +1344,12 @@ async function cmdSetDifficulty(elo: number) {
 }
 
 async function cmdMaintenance(id: "refresh" | "snapshot" | "cache" | "wipe" | "reset", skipConfirm = false) {
+  // The server rejects the physical reset in ERROR (arm may be unsafe);
+  // surface that before the arm-confirm dialog rather than as a failed call.
+  if (id === "reset" && currentMode === MODE_ERROR) {
+    pushEvent("err", "reset: physical reset is disabled while faulted — use Reset state in the banner");
+    return;
+  }
   if (id === "reset" && !skipConfirm && !confirm("Physically reset the board?")) return;
   if (id === "wipe" && !skipConfirm && !confirm("Wipe game state?")) return;
   try {
@@ -1161,7 +1444,304 @@ function toggleCamera() {
   else void detachCamera();
 }
 
+// ── Set-Board modal ────────────────────────────────────────────────────────
+// Board editor for the set-board command: sync the game state to whatever is
+// on the physical board, without moving the arm. Recovery tool for drift.
+
+let sbBoard: (string | null)[][] = emptyBoard();
+let sbWhiteGY: string[] = [];
+let sbBlackGY: string[] = [];
+let sbTurn: "w" | "b" = "w";
+type SBDragSrc = { kind: "board"; sq: string; piece: string } | { kind: "palette"; piece: string };
+let sbDragSrc: SBDragSrc | null = null;
+let sbPaletteSelected: string | null = null;
+
+function sqToRc(sq: string): [number, number] {
+  return [8 - parseInt(sq[1], 10), sq.charCodeAt(0) - 97];
+}
+
+function sbBoardToFEN(): string {
+  const placement = sbBoard
+    .map((row) => {
+      let s = "";
+      let empty = 0;
+      for (const p of row) {
+        if (!p) { empty++; }
+        else { if (empty) { s += empty; empty = 0; } s += p; }
+      }
+      if (empty) s += empty;
+      return s;
+    })
+    .join("/");
+  // Castling is inferred from king/rook home squares — an edited position has
+  // no move history to derive rights from.
+  let castling = "";
+  if (sbBoard[7]?.[4] === "K") {
+    if (sbBoard[7]?.[7] === "R") castling += "K";
+    if (sbBoard[7]?.[0] === "R") castling += "Q";
+  }
+  if (sbBoard[0]?.[4] === "k") {
+    if (sbBoard[0]?.[7] === "r") castling += "k";
+    if (sbBoard[0]?.[0] === "r") castling += "q";
+  }
+  return `${placement} ${sbTurn} ${castling || "-"} - 0 1`;
+}
+
+function setSBPaletteSelected(piece: string | null) {
+  sbPaletteSelected = piece;
+  document.getElementById("sb-board")?.classList.toggle("palette-active", piece !== null);
+  const wGY = document.getElementById("sb-white-gy");
+  const bGY = document.getElementById("sb-black-gy");
+  if (!piece) {
+    if (wGY) wGY.style.cursor = "";
+    if (bGY) bGY.style.cursor = "";
+  } else {
+    const isWhite = piece === piece.toUpperCase();
+    if (wGY) wGY.style.cursor = isWhite ? "pointer" : "not-allowed";
+    if (bGY) bGY.style.cursor = isWhite ? "not-allowed" : "pointer";
+  }
+  document.querySelectorAll<HTMLImageElement>(".sb-palette-piece").forEach((el) => {
+    el.classList.toggle("sb-palette-selected", el.dataset.piece === piece);
+  });
+}
+
+function renderSBBoard() {
+  const boardEl = document.getElementById("sb-board");
+  if (!boardEl) return;
+  boardEl.innerHTML = "";
+  boardEl.classList.toggle("palette-active", sbPaletteSelected !== null);
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const sq = rcToSq(r, c);
+      const isLight = (r + c) % 2 === 0;
+      const piece = sbBoard[r]?.[c] ?? null;
+      const cell = document.createElement("div");
+      cell.className = `sb-square ${isLight ? "light" : "dark"}`;
+      cell.dataset.sq = sq;
+      if (r === 7) {
+        const f = document.createElement("span");
+        f.className = "coord file";
+        f.textContent = String.fromCharCode(97 + c);
+        cell.appendChild(f);
+      }
+      if (c === 0) {
+        const ra = document.createElement("span");
+        ra.className = "coord rank";
+        ra.textContent = String(8 - r);
+        cell.appendChild(ra);
+      }
+      if (piece) {
+        cell.classList.add("sb-has-piece");
+        const url = pieceUrl(piece);
+        if (url) {
+          const img = document.createElement("img");
+          img.className = "piece sb-piece";
+          img.src = url;
+          img.alt = piece;
+          img.draggable = true;
+          img.addEventListener("dragstart", (e) => {
+            sbDragSrc = { kind: "board", sq, piece };
+            e.dataTransfer?.setData("text/plain", sq);
+          });
+          img.addEventListener("dragend", () => { sbDragSrc = null; });
+          cell.appendChild(img);
+        }
+      }
+      // Click handler on every cell:
+      // occupied square → always remove; empty square + palette selected → place
+      cell.addEventListener("click", () => {
+        if (sbDragSrc) return;
+        if (piece) {
+          sbBoard[r][c] = null;
+          renderSBBoard();
+        } else if (sbPaletteSelected) {
+          sbBoard[r][c] = sbPaletteSelected;
+          renderSBBoard();
+        }
+      });
+      cell.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        cell.classList.add("sb-drag-over");
+      });
+      cell.addEventListener("dragleave", () => cell.classList.remove("sb-drag-over"));
+      cell.addEventListener("drop", (e) => {
+        e.preventDefault();
+        cell.classList.remove("sb-drag-over");
+        if (!sbDragSrc) return;
+        if (sbDragSrc.kind === "board" && sbDragSrc.sq !== sq) {
+          const [sr, sc] = sqToRc(sbDragSrc.sq);
+          sbBoard[sr][sc] = null;
+        }
+        sbBoard[r][c] = sbDragSrc.piece;
+        sbDragSrc = null;
+        renderSBBoard();
+      });
+      boardEl.appendChild(cell);
+    }
+  }
+}
+
+function renderSBGY(id: string, pieces: string[], isWhite: boolean) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = "";
+  pieces.forEach((p, idx) => {
+    const url = pieceUrl(p);
+    if (!url) return;
+    const img = document.createElement("img");
+    img.className = "sb-gy-piece";
+    img.src = url;
+    img.alt = p;
+    img.title = "Click to remove";
+    img.addEventListener("click", () => {
+      if (isWhite) sbWhiteGY.splice(idx, 1);
+      else sbBlackGY.splice(idx, 1);
+      renderSBGYs();
+    });
+    el.appendChild(img);
+  });
+}
+
+function renderSBGYs() {
+  renderSBGY("sb-white-gy", sbWhiteGY, true);
+  renderSBGY("sb-black-gy", sbBlackGY, false);
+}
+
+function initSBPalette(id: string, pieces: string[]) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = "";
+  for (const piece of pieces) {
+    const url = pieceUrl(piece);
+    if (!url) continue;
+    const img = document.createElement("img");
+    img.className = "sb-palette-piece";
+    img.src = url;
+    img.alt = piece;
+    img.draggable = true;
+    img.dataset.piece = piece;
+    img.addEventListener("dragstart", () => { sbDragSrc = { kind: "palette", piece }; setSBPaletteSelected(null); });
+    img.addEventListener("dragend", () => { sbDragSrc = null; });
+    // Click-to-select: toggle selection; deselect if clicking same piece
+    img.addEventListener("click", () => {
+      setSBPaletteSelected(sbPaletteSelected === piece ? null : piece);
+    });
+    el.appendChild(img);
+  }
+}
+
+function setupSBGYDropZone(id: string, isWhite: boolean) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("click", () => {
+    if (!sbPaletteSelected) return;
+    const pieceIsWhite = sbPaletteSelected === sbPaletteSelected.toUpperCase();
+    if (pieceIsWhite !== isWhite) return;
+    if (isWhite) sbWhiteGY.push(sbPaletteSelected);
+    else sbBlackGY.push(sbPaletteSelected);
+    renderSBGYs();
+  });
+  el.addEventListener("dragover", (e) => {
+    if (!sbDragSrc) return;
+    const pieceIsWhite = sbDragSrc.piece === sbDragSrc.piece.toUpperCase();
+    if (pieceIsWhite !== isWhite) return;
+    e.preventDefault();
+    el.classList.add("sb-drag-over");
+  });
+  el.addEventListener("dragleave", () => el.classList.remove("sb-drag-over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.classList.remove("sb-drag-over");
+    if (!sbDragSrc) return;
+    const pieceIsWhite = sbDragSrc.piece === sbDragSrc.piece.toUpperCase();
+    if (pieceIsWhite !== isWhite) { sbDragSrc = null; return; }
+    if (sbDragSrc.kind === "board") {
+      const [sr, sc] = sqToRc(sbDragSrc.sq);
+      sbBoard[sr][sc] = null;
+      renderSBBoard();
+    }
+    if (isWhite) sbWhiteGY.push(sbDragSrc.piece);
+    else sbBlackGY.push(sbDragSrc.piece);
+    sbDragSrc = null;
+    renderSBGYs();
+  });
+}
+
+function openSBModal() {
+  if (currentFen) {
+    const parsed = parseFENPlacement(currentFen);
+    sbBoard = parsed.board;
+    sbTurn = parsed.turn;
+  } else {
+    sbBoard = emptyBoard();
+    sbTurn = "w";
+  }
+  sbWhiteGY = [...whiteGraveyard];
+  sbBlackGY = [...blackGraveyard];
+  sbPaletteSelected = null;
+  const wRadio = document.getElementById("sb-turn-w") as HTMLInputElement | null;
+  const bRadio = document.getElementById("sb-turn-b") as HTMLInputElement | null;
+  if (wRadio) wRadio.checked = sbTurn === "w";
+  if (bRadio) bRadio.checked = sbTurn === "b";
+  initSBPalette("sb-white-palette", ["K", "Q", "R", "B", "N", "P"]);
+  initSBPalette("sb-black-palette", ["k", "q", "r", "b", "n", "p"]);
+  renderSBBoard();
+  renderSBGYs();
+  document.getElementById("sb-error")?.classList.add("hidden");
+  document.getElementById("set-board-modal")?.classList.remove("hidden");
+}
+
+function closeSBModal() {
+  setSBPaletteSelected(null);
+  document.getElementById("set-board-modal")?.classList.add("hidden");
+}
+
+async function cmdSetBoard() {
+  document.getElementById("sb-error")?.classList.add("hidden");
+  try {
+    const fen = sbBoardToFEN();
+    await withBusy(async () => {
+      await doCommand({
+        "set-board": {
+          fen,
+          white_graveyard: sbWhiteGY,
+          black_graveyard: sbBlackGY,
+        },
+      });
+      resetTape();
+      lastMove = null;
+      serverAuthoritative = true;
+      suppressFenInferOnce = true;
+      pushEvent("wipe", "board state set");
+    });
+    closeSBModal();
+  } catch (e) {
+    // The server rejects set-board in START (its tick wipes the saved game) —
+    // that rejection, like any other failure, surfaces inline in the modal.
+    const msg = e instanceof Error ? e.message : String(e);
+    const errEl = document.getElementById("sb-error");
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove("hidden"); }
+  }
+}
+
 // ── Wire events ────────────────────────────────────────────────────────────
+
+setupSBGYDropZone("sb-white-gy", true);
+setupSBGYDropZone("sb-black-gy", false);
+document.getElementById("btn-set-fen")!.addEventListener("click", openSBModal);
+document.getElementById("sb-cancel")!.addEventListener("click", closeSBModal);
+document.getElementById("sb-confirm")!.addEventListener("click", () => void cmdSetBoard());
+document.getElementById("set-board-modal")!.addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeSBModal();
+});
+document.getElementById("sb-turn-w")!.addEventListener("change", () => { sbTurn = "w"; });
+document.getElementById("sb-turn-b")!.addEventListener("change", () => { sbTurn = "b"; });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (sbPaletteSelected) { setSBPaletteSelected(null); return; }
+    if (!document.getElementById("set-board-modal")?.classList.contains("hidden")) closeSBModal();
+  }
+});
 
 document.getElementById("btn-go")!.addEventListener("click", () => void cmdGo());
 document.getElementById("tape-logs-toggle")!.addEventListener("click", () => {
@@ -1182,19 +1762,10 @@ document.getElementById("move-to")!.addEventListener("keydown", (e) => {
 document.getElementById("go-n")!.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") void cmdGo();
 });
-document.getElementById("auto-mode")!.addEventListener("change", async (e) => {
-  const cb = e.target as HTMLInputElement;
-  const next = cb.checked;
-  autoMode = next; // optimistic — prevents snapshot poll from reverting during in-flight doCommand
-  try {
-    await setAutoModeOnServer(next);
-  } catch (err) {
-    cb.checked = !next;
-    autoMode = !next;
-    const msg = err instanceof Error ? err.message : String(err);
-    pushEvent("err", `auto toggle: ${msg}`);
-  }
+document.getElementById("btn-error-resume")!.addEventListener("click", () => {
+  if (errPrevMode > 0) void setModeOnServer(errPrevMode);
 });
+document.getElementById("btn-error-reset")!.addEventListener("click", () => void setModeOnServer(MODE_START));
 document.getElementById("cam-toggle")!.addEventListener("click", toggleCamera);
 document.getElementById("btn-difficulty")!.addEventListener("click", async () => {
   const elo = parseInt((document.getElementById("difficulty-elo") as HTMLInputElement).value, 10);
@@ -1226,10 +1797,11 @@ document.querySelectorAll(".inline-error").forEach((pop) => {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 companion.init({
-  onAutoEnable: async () => { await setAutoModeOnServer(true); },
-  onAutoDisable: async () => { await setAutoModeOnServer(false); },
+  onStartGame: async () => { await setModeOnServer(MODE_VS_HUMAN); },
+  onStartSelfPlay: async () => { await setModeOnServer(MODE_VS_SELF); },
   onWipe: () => void cmdMaintenance("wipe", true),
   onReset: () => void cmdMaintenance("reset", true),
+  onSetBoard: openSBModal,
 });
 
 if (new URLSearchParams(window.location.search).has("compact")) {
@@ -1241,45 +1813,48 @@ if (mockMode) {
 } else {
   loadPersistedState();
 }
-// Sync the Auto checkbox to the persisted/mock value.
-{
-  const autoCheckbox = document.getElementById("auto-mode") as HTMLInputElement | null;
-  if (autoCheckbox) autoCheckbox.checked = autoMode;
-}
 renderBoard();
 renderMaterial();
 renderTape();
 renderTopStatus();
 renderEvalBar();
+renderModePanel();
 
 if (mockMode) {
   setStatus("mock", "warn");
   document.getElementById("board-loading")?.classList.add("hidden");
   const machineEl = document.getElementById("machine-name");
   if (machineEl) machineEl.textContent = "mock";
+  // ?mode=N previews the mode control / fault banner without a robot.
+  const mockModeParam = parseInt(new URLSearchParams(window.location.search).get("mode") ?? "", 10);
+  if (!isNaN(mockModeParam)) updateMode(mockModeParam);
+  const mockActive = gameActive();
   const companionScenario = new URLSearchParams(window.location.search).get("companion");
   if (companionScenario === "won") {
-    companion.onInit(plyCount, autoMode, 0, "white-won");
+    companion.onInit(plyCount, mockActive, 0, "white-won");
   } else if (companionScenario === "lost") {
-    companion.onInit(plyCount, autoMode, 0, "black-won");
+    companion.onInit(plyCount, mockActive, 0, "black-won");
   } else if (companionScenario === "draw") {
-    companion.onInit(plyCount, autoMode, 0, "draw");
+    companion.onInit(plyCount, mockActive, 0, "draw");
   } else if (companionScenario === "bad-state") {
-    companion.onInit(plyCount, autoMode, 4, "");
+    companion.onInit(plyCount, mockActive, 4, "");
     companion.forceScenario("bad-state");
+  } else if (companionScenario === "needs-fix") {
+    companion.onInit(plyCount, mockActive, 0, "");
+    companion.forceScenario("needs-fix");
   } else if (companionScenario === "welcome") {
     companion.onInit(0, false, 0, "");
   } else if (companionScenario === "first-move") {
     companion.onInit(0, false, 0, "");
     setTimeout(() => companion.onMove(1), 100);
   } else if (companionScenario === "first-capture") {
-    companion.onInit(plyCount, autoMode, 0, "");
+    companion.onInit(plyCount, mockActive, 0, "");
     companion.onFirstCapture();
   } else if (companionScenario === "in-check") {
-    companion.onInit(plyCount, autoMode, 0, "", false);
-    companion.onSnapshot(plyCount, autoMode, 0, "", true);
+    companion.onInit(plyCount, mockActive, 0, "", false);
+    companion.onSnapshot(plyCount, mockActive, 0, "", true);
   } else {
-    companion.onInit(plyCount, autoMode, 0, "");
+    companion.onInit(plyCount, mockActive, 0, "");
   }
 } else {
   connect()

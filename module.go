@@ -89,6 +89,11 @@ type viamChessChess struct {
 	// engine move (whether triggered by cmd.Go or auto-mode). nil = disabled.
 	onMoveTarget resource.Resource
 
+	// onModeTarget receives a "mode_changed" domain event (with a set_page
+	// field the chess-streamdeck understands) after every mode change.
+	// nil = disabled. See announceModeChange.
+	onModeTarget resource.Resource
+
 	// lastScoreCP is the most recent engine evaluation in centipawns,
 	// normalized to white-relative (positive = white ahead).
 	// Updated after every engine move; zero before the first move or when
@@ -182,6 +187,20 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 		}
 	}
 	s.announceEnabled.Store(true)
+
+	if conf.OnModeTarget != "" {
+		s.onModeTarget, err = generic.FromProvider(deps, conf.OnModeTarget)
+		if err != nil {
+			// Optional dep, same rebuild story as on_move_target.
+			logger.Warnf("on_mode_target %q not yet available, mode-page sync disabled until rebuild: %v", conf.OnModeTarget, err)
+			s.onModeTarget = nil
+		}
+	}
+	// Hook the machine before anything can transition (the board loop starts
+	// below), then sync the target to the boot mode: chess always boots into
+	// START, but the deck may still be showing a page from a previous run.
+	s.mode.notify = s.announceModeChange
+	s.announceModeChange(s.mode.current(), s.mode.current())
 
 	s.poseStart, err = toggleswitch.FromProvider(deps, conf.PoseStart)
 	if err != nil {

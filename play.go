@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -213,6 +214,35 @@ func (s *viamChessChess) announceMove(move, fen, by string) {
 		}
 		if _, err := s.onMoveTarget.DoCommand(ctx, payload); err != nil {
 			s.logger.Warnf("on_move_target dispatch failed: %v", err)
+		}
+	}()
+}
+
+// announceModeChange dispatches a "mode_changed" event to the configured
+// on_mode_target generic service after every mode change, command-driven or
+// automatic (game over, faults, resets). In practice the target is the
+// chess-streamdeck module: it reads the set_page field and flips to the page
+// named after the new mode, so a physical control surface stays in sync with
+// mode changes it didn't initiate (web app, another client, the loop itself).
+// Fire-and-forget with its own timeout, like announceMove.
+func (s *viamChessChess) announceModeChange(from, to Mode) {
+	if s.onModeTarget == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		payload := map[string]interface{}{
+			"event":     "mode_changed",
+			"mode":      int(to),
+			"mode_name": to.String(),
+			"prev_mode": int(from),
+			// Page names follow the deck's own response-driven switching, which
+			// normalizes numeric modes to their integer strings ("0".."5").
+			"set_page": strconv.Itoa(int(to)),
+		}
+		if _, err := s.onModeTarget.DoCommand(ctx, payload); err != nil {
+			s.logger.Warnf("on_mode_target dispatch failed (mode %v -> %v): %v", from, to, err)
 		}
 	}()
 }
