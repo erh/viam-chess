@@ -1240,12 +1240,55 @@ func GetPickupCenter(o *viz.Object) r3.Vector {
 		return center
 	}
 
+	// Old: avg of highest point and center. 
+	// high := touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000))
+	// return r3.Vector{
+	// 	X: (center.X + high.X) / 2,
+	// 	Y: (center.Y + high.Y) / 2,
+	// 	Z: high.Z,
+	// }
+
+	// // Option 1: Collect all points, sort by Z descending, average the top 5 for XY.
+	// type pt struct{ x, y, z float64 }
+	// var pts []pt
+	// o.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+	// 	pts = append(pts, pt{p.X, p.Y, p.Z})
+	// 	return true
+	// })
+	// sort.Slice(pts, func(i, j int) bool { return pts[i].z > pts[j].z })
+
+	// n := 5
+	// if len(pts) < n {
+	// 	n = len(pts)
+	// }
+	// if n == 0 {
+	// 	return center
+	// }
+
+	// var sumX, sumY float64
+	// for _, p := range pts[:n] {
+	// 	sumX += p.x
+	// 	sumY += p.y
+	// }
+	// return r3.Vector{X: sumX / float64(n), Y: sumY / float64(n), Z: pts[0].z}
+
+	// Option 2: Average XY of all points within 20mm of the highest point
 	high := touch.PCFindHighestInRegion(o, image.Rect(-1000, -1000, 1000, 1000))
-	return r3.Vector{
-		X: (center.X + high.X) / 2,
-		Y: (center.Y + high.Y) / 2,
-		Z: high.Z,
+	const topBandMM = 20.0
+	var sumX, sumY float64
+	var count int
+	o.Iterate(0, 0, func(p r3.Vector, d pointcloud.Data) bool {
+		if p.Z >= high.Z-topBandMM {
+			sumX += p.X
+			sumY += p.Y
+			count++
+		}
+		return true
+	})
+	if count == 0 {
+		return center
 	}
+	return r3.Vector{X: sumX / float64(count), Y: sumY / float64(count), Z: high.Z}
 }
 
 func (bc *PieceFinder) GetProperties(ctx context.Context, extra map[string]interface{}) (*vision.Properties, error) {
