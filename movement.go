@@ -207,9 +207,9 @@ func (s *viamChessChess) movePieceWithPickupZ(ctx context.Context, data viscaptu
 			return err
 		}
 
-		err = s.setupGripper(ctx)
+		_, err = s.gripper.DoCommand(ctx, map[string]interface{}{"set": s.conf.gripperOpenPos()})
 		if err != nil {
-			return err
+			return errExec(err)
 		}
 
 		err = s.moveGripper(ctx, r3.Vector{X: destXY.X, Y: destXY.Y, Z: safeZ})
