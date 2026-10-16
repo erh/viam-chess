@@ -8,7 +8,7 @@ require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
 	github.com/mitchellh/mapstructure v1.5.0
 	go.uber.org/multierr v1.11.0
-	go.viam.com/rdk v1.12.1-0.20261016054401-0682222076e1
+	go.viam.com/rdk v1.12.1-0.20261016131550-4fdde85f0aad
 	go.viam.com/test v1.2.4
 	go.viam.com/utils v0.13.2
 	golang.org/x/image v0.41.0
@@ -204,7 +204,7 @@ require (
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	go.viam.com/api v0.1.598-0.20261016051141-e3f09eb03e71 // indirect
+	go.viam.com/api v0.1.598-0.20261016130902-d72cb650a53b // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20230525183740-e7c30c78aeb2 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
