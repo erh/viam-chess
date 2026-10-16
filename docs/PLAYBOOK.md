@@ -5,7 +5,7 @@
 This is the behavioural contract for the `erh:viam-chess` module and the machine
 it runs on. The [README](../README.md) documents *what the module is* and how to
 configure it; this playbook documents *how it behaves at runtime* — the modes it
-occupies, what happens on every tick, which failures are benign and which halt
+occupies, what happens on every scan, which failures are benign and which halt
 the robot, and what an operator should see and do.
 
 Part 1 is the **operator runbook** (no Viam knowledge assumed). Part 2 is the
@@ -27,8 +27,8 @@ markers cited in the Go source to the sections here.
 **Part 2 — Engineer reference**
 
 6. [Resource topology](#6-resource-topology)
-7. [The board loop](#7-the-board-loop)
-8. [Mode machine](#8-mode-machine)
+7. [Tasks](#7-tasks)
+8. [The state machine](#8-the-state-machine)
 9. [The turn cycle](#9-the-turn-cycle)
 10. [Perception pipeline](#10-perception-pipeline)
 11. [Physical geometry](#11-physical-geometry-graveyard-promotion-pickup)
@@ -75,16 +75,18 @@ to them:
 ## 2. The six modes
 
 At any moment the robot is in exactly one mode, and that mode fully determines
-what it will do. The Stream Deck page mirrors the current mode.
+what it will do. A mode is a top-level state of the robot's **state machine**
+(a Viam `state_machine` service, see [§8](#8-the-state-machine)); the numbers
+are the legacy view the `chess` service reports and the Stream Deck page mirrors.
 
-| # | Mode | What the robot is doing | Will it move a piece? |
-|---|------|-------------------------|----------------------|
-| 0 | **START** | No game. Entry hub — waiting for you to choose an opponent. | No |
-| 1 | **IDLE** | A game exists but is suspended (paused) or finished. | No |
-| 2 | **VS_HUMAN** | Watching for your move, then replying as Black. | Yes |
-| 3 | **VS_SELF** | Playing itself, one half-move per tick. | Yes |
-| 4 | **TEACHING** | Game preserved, robot passive. *Stub — no behaviour yet.* | No |
-| 5 | **ERROR** | Something physical failed. Loop halted, arm homed. | No |
+| # | Mode | State | What the robot is doing | Will it move a piece? |
+|---|------|-------|-------------------------|----------------------|
+| 0 | **START** | `start` | No game. Entry hub — waiting for you to choose an opponent. | No |
+| 1 | **IDLE** | `idle`, `game_over` | A game exists but is suspended (paused) or finished. | No |
+| 2 | **VS_HUMAN** | `vs_human` | Watching for your move, then replying as Black. | Yes |
+| 3 | **VS_SELF** | `vs_self` | Playing itself, one half-move after another. | Yes |
+| 4 | **TEACHING** | `teaching` | Game preserved, robot passive. *Stub — no behaviour yet.* | No |
+| 5 | **ERROR** | `error`, `stuck` | Something physical failed. Arm homed, nothing runs. | No |
 
 Modes 0, 1, 4 and 5 are **passive**: the robot keeps watching and keeps its
 board display up to date, but it will never touch a piece. Only modes 2 and 3
@@ -115,7 +117,7 @@ move the arm during play.
 
 Press **Machine vs. Machine** → mode 3 (VS_SELF). The robot verifies the board
 on the very first half-move only, then plays both sides *blind* — it trusts its
-own arm and stops checking the camera against the game. One half-move per tick.
+own arm and stops checking the camera against the game. One half-move after another.
 
 ### Pausing and resuming
 
@@ -169,7 +171,7 @@ It clears itself as soon as it does.
 
 The robot is waiting for you. Put the pieces back where the *game* says they
 should be — the board display shows the position it is tracking. Once the
-physical board matches, `needs_fix` clears on the next tick and play resumes.
+physical board matches, `needs_fix` clears on the next scan and play resumes.
 
 If you can't reconcile it, abandon the game: **mode 0** (manual reset) → set up
 a fresh board → choose an opponent again.
@@ -178,7 +180,7 @@ a fresh board → choose an opponent again.
 
 ERROR means a **physical execution fault** — the arm couldn't reach a pose, the
 gripper failed to grab after two attempts, or the chess engine died. The robot
-has halted the loop and homed the arm. It will not move again until you act.
+has stopped its task and homed the arm. It will not move again until you act.
 The saved game is preserved.
 
 1. **Look at the robot first.** Clear any obstruction; check whether a piece was
@@ -265,129 +267,136 @@ the dependency resolves without intervention.
 > `on_move_target` produces one warning at build time and then permanent silent
 > inactivity. Verify by name against the machine config, not by expecting an error.
 
-## 7. The board loop
+## 7. Tasks
 
-A single background goroutine, started in the constructor, driving everything.
-Cadence is `board-loop-interval-ms`; **`0` disables the loop entirely**, in
-which case `board-snapshot` degrades to a per-call camera capture and no
-autonomous play happens at all.
+There is no background loop. Everything the robot does on its own is a
+**task** — a Viam `task` service: one unit of work that runs once, reports
+progress, and returns an *outcome* (`done`, `moved`, `game_over`, …). The
+state machine decides which task runs and what each outcome means. The tasks
+never decide what comes next, which is what keeps them reusable.
 
-Each tick:
+This module ships five, all bound to the `chess` service by their `chess`
+attribute (they must be in the same module: they share its game state, board
+cache and command lock):
 
-```mermaid
-flowchart TD
-    T["tick"] --> M{"mode == ERROR?"}
-    M -->|yes| STOP["return immediately<br/><i>before taking the lock</i>"]
-    M -->|no| L["acquire doCommandLock"]
-    L --> S{"mode == START?"}
-    S -->|yes| EN["ensureNoGame()"]
-    S -->|no| P
-    EN --> P["<b>shared prologue</b><br/>goToStart → capture → cache squares"]
-    P --> F{"prologue failed?"}
-    F -->|yes| SKIP["log warn, skip tick<br/><i>not an ERROR</i>"]
-    F -->|no| D{"dispatch on mode"}
-    D -->|0,1,4| PASS["passive:<br/>clear needs_fix, refresh snapshot"]
-    D -->|2| VH["tickVsHuman"]
-    D -->|3| VS["tickVsSelf"]
-```
+| Task | Runs | Outcomes |
+|------|------|----------|
+| `watch-board` | home the arm → capture → refresh the snapshot, every `interval-ms`, forever | — (cancelled when its state is left) |
+| `wait-human-move` | the same scan, plus human-move detection, until a move is registered | `moved`, `engine_turn` (it is already the robot's turn), `game_over` |
+| `engine-move` | one engine move on the physical board | `done`, `game_over` |
+| `home` | `goToStart` | `done` |
+| `reset-board` | the full physical reset | `done` |
 
 Four properties matter for reliability:
 
-1. **ERROR returns before acquiring the lock.** This is what keeps manual
-   recovery commands responsive while halted.
-2. **The mode is read once, at tick start.** A mode change mid-tick takes effect
-   on the *next* tick; the in-flight arm motion finishes first. This is the
-   mechanism behind "pause acks instantly, the current move completes".
-3. **The prologue homes the arm every tick, in every non-ERROR mode.** Homing
-   is what clears the arm from the camera's field of view. It is not conditional
-   on there being a game — a passive robot still commands the arm and opens the
-   gripper on every tick.
-4. **A prologue failure is transient, not a fault.** A failed home or capture
-   logs a warning and forfeits the tick. It does not enter ERROR. Persistent
-   prologue failure therefore presents as a robot that looks alive but never
+1. **The shared prologue is in every watching task.** Homing is what clears
+   the arm from the camera's field of view. It is not conditional on there
+   being a game — a passive robot still commands the arm and opens the gripper
+   on every scan.
+2. **A prologue failure is transient, not a fault.** A failed home or capture
+   logs a warning and forfeits the scan; the task keeps going. Persistent
+   failure therefore presents as a robot that looks alive but never
    progresses — check the logs, not the mode.
+3. **A move in flight always completes.** `engine-move` runs the physical move
+   on a context that ignores cancellation and checks for it only between
+   moves (`reset-board` likewise, between pieces). Leaving a state cancels its
+   task, but the arm never aborts mid-reach, so a pause never drops a piece.
+   The machine's `cancel_timeout` (90 s in the example) must cover a move.
+4. **Only execution faults fail a task.** A board that can't be reconciled
+   sets `needs_fix` and the task waits; an arm, gripper or engine failure
+   returns an error, which the machine treats as the outcome `error`
+   ([§12](#12-error-taxonomy)).
 
-The loop holds `doCommandLock` for the whole tick, including any arm motion.
-`board-snapshot`, `{"mode":N}`, `{"auto":bool}` and `mode-status` all bypass
-this lock so that polling clients and the pause control stay responsive during a
-multi-second arm move.
+A task holds `doCommandLock` while it scans or moves, exactly as the old loop
+held it per tick. `board-snapshot`, `{"mode":N}`, `{"auto":bool}` and
+`mode-status` all bypass this lock so that polling clients and the pause
+control stay responsive during a multi-second arm move.
 
-## 8. Mode machine
+## 8. The state machine
 
-`mode.go` holds the authoritative transition table. Everything is guarded by one
-`RWMutex`, so transitions are atomic.
+The modes, the transition table and the "what runs in each mode" wiring live
+in **config**, as an `rdk:service:state_machine` service named by the `chess`
+service's `state-machine` attribute. `examples/config1.json` ships the
+machine this module was built around:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> START : boot (always)
-    START --> VS_HUMAN : mode 2
-    START --> VS_SELF : mode 3
-    VS_HUMAN --> TEACHING : mode 4
-    TEACHING --> VS_HUMAN : mode 2
-    VS_HUMAN --> IDLE : mode 1 (pause)
-    VS_SELF --> IDLE : mode 1 (pause)
-    TEACHING --> IDLE : mode 1 (pause)
-    IDLE --> VS_HUMAN : resume
-    IDLE --> VS_SELF : resume
-    IDLE --> TEACHING : resume
-    IDLE --> START : mode 0
-    ERROR --> START : mode 0
-    ERROR --> VS_HUMAN : resume
-    ERROR --> VS_SELF : resume
-    note left of ERROR
-      any active mode → ERROR
-      on execution fault
-    end note
-    note right of IDLE
-      game over → IDLE
-      with resume disabled
+    [*] --> start : boot (always)
+    state start {
+        wiping --> watching : done
+    }
+    state vs_human {
+        waiting --> replying : moved / engine_turn
+        replying --> waiting : done
+    }
+    state vs_self {
+        playing --> playing : done
+    }
+    start --> vs_human : mode.vs_human
+    start --> vs_self : mode.vs_self
+    vs_human --> teaching : mode.teaching
+    teaching --> vs_human : mode.vs_human
+    vs_human --> idle : pause
+    vs_self --> idle : pause
+    teaching --> idle : pause
+    idle --> vs_human : resume ($history) / mode.vs_human
+    idle --> vs_self : resume ($history) / mode.vs_self
+    idle --> start : mode.start
+    vs_human --> game_over : game_over
+    vs_self --> game_over : game_over
+    game_over --> start : mode.start
+    error --> start : mode.start
+    error --> vs_human : resume ($history)
+    error --> stuck : error
+    note left of error
+      any state → error
+      on a task error
     end note
 ```
 
-### Correlated state
+What each state runs: `start` wipes the game (`do_command` on `chess`) and
+then watches; `idle`, `teaching` and `game_over` watch; `vs_human` alternates
+`wait-human-move` and `engine-move` (both told `"side": "black"`); `vs_self`
+runs `engine-move` in a loop; `error` runs `home` once and then waits.
 
-Three fields travel with the mode, and the distinction between them is
-load-bearing:
+### How the old guards map
 
-| Field | Meaning |
-|-------|---------|
-| `idleOrigin` | Which mode IDLE resumes to. Set on entering IDLE. |
-| `errPrevMode` | Which mode ERROR resumes to. Set on entering ERROR. |
-| `gameOver` | Set when a game *ends* into IDLE. Permanently disables resume. |
+| Old mechanism | Now |
+|---------------|-----|
+| Transition table in `mode.go` | each state's `on` map; an event with no handler in the current state or its ancestors is dropped, and `{"mode":N}` reports it as an illegal transition |
+| `idleOrigin` / `errPrevMode` | the machine's `$history` target: `resume` re-enters whichever state was active before `idle` or `error` |
+| `gameOver` disables resume | `game_over` is its own state with only `mode.start` out of it |
+| automatic game-over edge | the `game_over` outcome of `wait-human-move` and `engine-move` |
+| automatic error edge | the machine-level `"error": "error"` handler: every task error bubbles to it |
+| `enterStart` after a physical reset | `{"reset": true}` sends `mode.start` when it is done |
+| START wipes the game inline | the `start.wiping` state runs `{"wipe": true}` on `chess` before watching |
 
-`idleOrigin` and `errPrevMode` are deliberately **separate** rather than one
-shared "previous mode". A fault while paused traces
-`IDLE → ERROR → resume → IDLE`, and IDLE must still remember its own origin.
+Resuming from `idle` by `{"mode": N}` enters that mode afresh rather than
+checking it was the origin. This is safe because the game lives in
+`state.json`, not in the mode, and `vs_human` is self-correcting: `waiting`
+returns `engine_turn` at once when it is Black's move, and `replying` returns
+`done` without moving when it is not.
 
-### Command vs. automatic edges
+### Transitions are events
 
-- **Command-driven** edges go through `transition(to)` and are validated against
-  the table. An illegal edge is rejected and the mode is unchanged.
-- **Automatic** edges bypass the table: `enterIdle` (game over), `enterError`
-  (execution fault, idempotent), `enterStart` (after a physical reset — allowed
-  from any non-ERROR mode, since rearranging pieces necessarily ends the game).
-
-### Transitions are lock-free
-
-`{"mode":N}` never takes `doCommandLock`. It flips in-memory state and returns.
-All physical and persistent consequences land on the next tick. Two exceptions
-run inline because they must not race:
-
-- **START → active** wipes the saved game immediately. START has no concurrent
-  state writer, so this is safe — and doing it inline closes the window where a
-  leftover game from a previous boot could be picked up.
-- **Resuming from ERROR** (to anything but START) first verifies the saved game
-  is readable, and refuses if not.
+`{"mode":N}` never takes `doCommandLock`. It sends one event to the machine
+and returns; the machine cancels the running task (the arm finishes its move
+first, [§7](#7-tasks)), enters the next state and starts its task. The machine
+can also be driven directly through its own API — `SendEvent`, `GetState`,
+`GetHistory`, `GetDefinition`, `Stop`, `Reset` — from any SDK or the app,
+which is how a Stream Deck key or an agent should talk to it.
 
 ### The `auto` compatibility shim
 
 `{"auto":bool}` is the pre-mode-machine API and is still emitted by the
-companion UI. It maps onto transitions: `auto:true` starts or resumes VS_HUMAN;
+companion UI. It maps onto events: `auto:true` starts or resumes VS_HUMAN;
 `auto:false` from VS_HUMAN pauses to IDLE; `auto:false` elsewhere is a no-op.
 Every response still reports `auto` (defined as `mode == VS_HUMAN`) alongside
-the newer `mode` field, so unmodified clients keep working.
+the `mode` field, so unmodified clients keep working.
 
-Every successful `DoCommand` response carries the current `mode`.
+Every successful `DoCommand` response carries the current `mode`, read from
+the machine. Without a `state-machine` configured, `mode` is always 0 and only
+manual commands work.
 
 ## 9. The turn cycle
 
@@ -396,7 +405,7 @@ Every successful `DoCommand` response carries the current `mode`.
 ```mermaid
 sequenceDiagram
     participant H as Human
-    participant L as Board loop
+    participant L as wait-human-move / engine-move
     participant V as piece-finder
     participant E as Engine
     participant A as Arm
@@ -438,16 +447,19 @@ Two subtleties worth knowing:
 - **Game-over is checked before replying**, so a human-delivered mate never
   triggers a doomed engine reply.
 
-The robot replies only when a human move was registered on *this* tick and it is
-Black's turn.
+`wait-human-move` returns `moved` only when a human move was registered on
+*this* scan (or `engine_turn` when it is already Black's turn, e.g. after a
+resume); the machine then runs `engine-move`, which replies only when it is
+Black's turn and hands control straight back to `wait-human-move`.
 
 ### VS_SELF
 
-One half-move per tick, alternating colours. The board is verified on the **first
-half-move only** (reusing the same sanity check `{"go":N}` performs); after that
-it plays blind and trusts the arm. A non-execution failure on that first
-half-move means the board isn't set up yet — it sets `needs_fix` and waits
-rather than faulting. Once the game ends it parks in IDLE; it never auto-restarts.
+`engine-move` runs in a loop (`playing --done--> playing`), alternating colours.
+The board is verified on the **first half-move only** (reusing the same sanity
+check `{"go":N}` performs); after that it plays blind and trusts the arm. A
+non-execution failure on that first half-move means the board isn't set up yet
+— the task sets `needs_fix` and waits rather than faulting. Once the game ends
+the `game_over` outcome parks the machine in `game_over`; it never auto-restarts.
 
 ## 10. Perception pipeline
 
@@ -567,20 +579,22 @@ propagates a wrapped `execError` is an execution fault.
 
 | Class | Examples | Consequence |
 |-------|----------|-------------|
-| **Execution fault** | Motion planning failure; `goToStart` failure during a move; gripper grab failure after 2 attempts; engine crash | → **ERROR**. Loop halts, arm homed best-effort, `state.json` preserved |
-| **Detection failure** | Board can't be mapped to a legal move; unresolvable difference count; illegal/scrambled position | → **`needs_fix`**. Robot waits for a human. Not an error |
-| **Transient** | Prologue home or capture failure | → warning, tick skipped. No state change |
+| **Execution fault** | Motion planning failure; `goToStart` failure during a move; gripper grab failure after 2 attempts; engine crash | → the task returns an error → outcome `error` → **ERROR** state. Arm homed best-effort, `state.json` preserved |
+| **Detection failure** | Board can't be mapped to a legal move; unresolvable difference count; illegal/scrambled position | → **`needs_fix`**. The task keeps waiting for a human. Not an error |
+| **Transient** | Prologue home or capture failure | → warning, scan skipped. No state change |
 | **Invalid input** | Bad command payload, illegal mode transition | → error returned to caller. No state change |
 
 Consequences of classifying by identity rather than call site:
 
 - An illegal-board error raised inside a manual `{"go":N}` correctly does **not**
   trip ERROR — it's a detection problem, not a hardware fault.
-- The board loop and the manual command path make the same decision from the
-  same information, so behaviour doesn't depend on how a move was triggered.
+- The tasks and the manual command path make the same decision from the same
+  information, so behaviour doesn't depend on how a move was triggered. A
+  manual command that hits an execution fault sends the machine an `error`
+  event, so it lands in ERROR exactly as a task failure would.
 
-`goToStart` failures are the one asymmetry: as part of the *tick prologue* they
-are transient (skip the tick), but the same failure *during a move* is an
+`goToStart` failures are the one asymmetry: as part of a *scan prologue* they
+are transient (skip the scan), but the same failure *during a move* is an
 execution fault, because a move that can't home cannot safely continue.
 
 ## 13. Persistence and lifecycle
@@ -603,8 +617,8 @@ opening position, which is what makes undo, capture attribution, and graveyard
 reconstruction possible. `fen` alone is a legacy fallback that loads but
 supports no undo.
 
-**File presence is the definition of "a game exists".** START enforces its
-absence idempotently on every tick and inline on the way out.
+**File presence is the definition of "a game exists".** Entering START wipes
+it (the `start.wiping` state) before the robot starts watching.
 
 ### Boot sequence
 
@@ -612,8 +626,12 @@ absence idempotently on every tick and inline on the way out.
 2. **`goToStart` — the constructor fails if the arm cannot home.** Startup is
    gated on a working arm.
 3. Locate `state.json`, launch the UCI engine.
-4. Start the board loop.
-5. Initialise the engine and apply the configured Elo.
+4. Initialise the engine and apply the configured Elo.
+
+The tasks then build (they depend on `chess`), and the state machine last (it
+depends on the tasks); the machine enters `start`, which wipes any game left
+on disk. `chess` picks the machine up on its next rebuild (it is an optional
+dependency, to keep the graph acyclic), from which point mode commands work.
 
 **The robot always boots into START**, regardless of any game left on disk.
 There is no mid-game crash recovery, by design: after an unplanned restart the
@@ -624,7 +642,7 @@ physical board state is unknown, so resuming would be a guess.
 Elo is applied via UCI `UCI_LimitStrength` / `UCI_Elo`, clamped to the range the
 engine reports, with a warning when clamped. The applied value is returned.
 `engine-millis` (default 10 ms) caps per-move search time and bounds how long an
-engine turn can stall the loop.
+engine turn can stall a task.
 
 ### Move announcements
 
@@ -659,11 +677,28 @@ Toggle at runtime with `set-announce`.
 | `graveyard-spacing-y` | `80.0` | mm between graveyard rows |
 | `gripper-open-pos` | `450.0` | Servo units |
 | `bad-diff-max-attempts` | `10` | Recapture retries on noisy diffs |
-| `board-loop-interval-ms` | `0` (**disabled**) | Loop cadence. Must be set for autonomous play |
+| `state-machine` | — | Optional; the machine that drives the modes. Without it: manual commands only |
 | `companion-bad-state-delay-ms` | `60000` | UI hint timing |
 | `companion-welcome-revive-ms` | `60000` | UI hint timing |
 | `companion-in-check-dismiss-ms` | `8000` | UI hint timing |
 | `companion-first-move-dismiss-ms` | `8000` | UI hint timing |
+
+### Tasks (`watch-board`, `wait-human-move`, `engine-move`, `home`, `reset-board`)
+
+**Required:** `chess` (the chess service, in this module).
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `interval-ms` | `1000` | Scan cadence of the watching tasks |
+
+Inputs come from the machine definition: `side` (`"black"`) on
+`wait-human-move` and `engine-move`; `sanity_check` on `engine-move`.
+
+### `chess-modes` (state machine)
+
+`initial: start`, `cancel_timeout: 90s`, machine-level `on: {"error": "error"}`,
+and the states of [§8](#8-the-state-machine). Must reference the task names
+above and the `chess` service by their configured names.
 
 ### `piece-finder` (vision service)
 
@@ -702,10 +737,10 @@ by what you're trying to do:
 
 | Intent | Command | Notes |
 |--------|---------|-------|
-| Change mode | `{"mode": 0-5}` | Validated; lock-free; effect lands next tick |
+| Change mode | `{"mode": 0-4}` | Sends the machine an event; illegal from the current state → error |
 | Legacy start/pause | `{"auto": bool}` | Shim onto VS_HUMAN ↔ IDLE |
-| Read mode only | `{"mode-status": true}` | Lock-free; no camera read |
-| Read board | `{"board-snapshot": true}` | Cache-served while the loop runs |
+| Read mode only | `{"mode-status": true}` | Lock-free; includes the machine's state path and status |
+| Read board | `{"board-snapshot": true}` | Cache-served while a watching task runs |
 | Read game state only | `{"game-events": true}` | No camera read |
 | Play N engine moves | `{"go": N}` | Sanity-checks the board on the first move |
 | Move a piece directly | `{"move": {...}}` | Bypasses game logic |
@@ -724,9 +759,11 @@ by what you're trying to do:
 - `DEBUG_FIND=1` — dumps board-finder hypotheses and aligned-line detail.
   Permanent tooling; see [CLAUDE.md](../CLAUDE.md).
 - `make cli` builds `chesscli` for terminal-driven testing.
+- `GetHistory` on the state machine is the timeline: every transition with its
+  trigger and the task result that caused it.
 - Sampling `board-snapshot` repeatedly is the cheapest way to measure perception
-  stability: the loop refreshes the cache each tick, so consecutive polls at the
-  loop interval are independent captures. Identical readings across samples mean
+  stability: the watching task refreshes the cache each scan, so consecutive
+  polls at the scan interval are independent captures. Identical readings across samples mean
   a stable board; varying readings localise the unstable squares.
 
 ## 16. Design limits (working as intended)
@@ -745,26 +782,21 @@ diagnosing.
 | Pause completes the in-flight move | Aborting mid-reach would drop a piece |
 | Optional dependencies fail silently | Keeps the resource graph acyclic and the service buildable |
 | TEACHING is a stub | Transitions and game preservation work; no behaviour yet |
-| Passive modes still home the arm every tick | The prologue is shared by all non-ERROR modes |
+| Passive modes still home the arm every scan | The prologue is shared by every watching task |
+| Resume from IDLE does not check the origin mode | The game lives in `state.json`; VS_HUMAN self-corrects on whose turn it is |
 
 ---
 
 ## Appendix A — Code cross-reference
 
-`play.go`, `do.go` and `module.go` cite `§N.N` markers from the original design
+`tasks.go`, `do.go` and `module.go` cite `§N.N` markers from the original design
 document. They map here as follows:
 
 | Marker | Cited in | Section |
 |--------|----------|---------|
-| §5 | `play.go` — passive modes never move a piece | [§2](#2-the-six-modes), [§7](#7-the-board-loop) |
-| §6.1 | `play.go` — mode read once per tick | [§7](#7-the-board-loop) |
-| §6.3 | `play.go`, `do.go` — ERROR halts; state preserved; resume needs an intact game | [§8](#8-mode-machine), [§12](#12-error-taxonomy) |
 | §6.4 | `do.go` — physical reset blocked in ERROR | [§5](#5-recovery), [§15](#15-command-reference-by-intent) |
-| §6.6 | `play.go` — robot plays black only | [§9](#9-the-turn-cycle), [§16](#16-design-limits-working-as-intended) |
-| §7.1 | `play.go` — START enforces no game | [§8](#8-mode-machine), [§13](#13-persistence-and-lifecycle) |
-| §7.3 | `play.go` — VS_SELF blind, no auto-restart | [§9](#9-the-turn-cycle) |
-| §7.4 | `module.go`, `play.go` — detection failure sets needs_fix, not ERROR | [§12](#12-error-taxonomy) |
-| §10.3 | `do.go` — lock-free transitions; inline START wipe | [§8](#8-mode-machine) |
-| §10.4 | `play.go` — prologue failure is transient | [§7](#7-the-board-loop), [§12](#12-error-taxonomy) |
-| §10.5 | `play.go` — game-over checked before replying | [§9](#9-the-turn-cycle) |
-| §10.6 | `do.go` — `auto` compatibility shim | [§8](#8-mode-machine) |
+| §7.4 | `module.go`, `tasks.go` — detection failure sets needs_fix, not ERROR | [§12](#12-error-taxonomy) |
+| §10.6 | `modes.go` — `auto` compatibility shim | [§8](#8-the-state-machine) |
+
+The transition table itself is no longer code: see the `chess-modes` service
+in [`examples/config1.json`](../examples/config1.json).

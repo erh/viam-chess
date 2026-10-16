@@ -140,6 +140,11 @@ func (s *viamChessChess) resetBoard(ctx context.Context) error {
 	}
 
 	for {
+		// Cancellation takes effect between moves: a move already under way
+		// always completes so no piece is dropped.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		from, to, err := nextResetMove(theState)
 		if err != nil {
 			return err
@@ -169,7 +174,7 @@ func (s *viamChessChess) resetBoard(ctx context.Context) error {
 				pickupZOverride = s.pickupZForPieceType(chess.Piece(theState.blackGraveyard[idx]).Type())
 			}
 		}
-		err = s.movePieceWithPickupZ(ctx, all, nil, fromStr, squareToString(to), nil, theState.board, pickupZOverride)
+		err = s.movePieceWithPickupZ(context.WithoutCancel(ctx), all, nil, fromStr, squareToString(to), nil, theState.board, pickupZOverride)
 		if err != nil {
 			return err
 		}

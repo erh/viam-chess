@@ -62,7 +62,216 @@
         "pose-start": "hack-pose-look-straight-down",
         "piece-finder": "piece-finder",
         "arm": "arm",
-        "cam": "cam"
+        "state-machine": "chess-modes"
+      },
+      "ui_folder": {
+        "name": "app"
+      }
+    },
+    {
+      "name": "watch-board",
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:watch-board",
+      "attributes": {
+        "chess": "chess",
+        "interval-ms": 1000
+      },
+      "ui_folder": {
+        "name": "chess-tasks"
+      }
+    },
+    {
+      "name": "wait-human-move",
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:wait-human-move",
+      "attributes": {
+        "chess": "chess",
+        "interval-ms": 1000
+      },
+      "ui_folder": {
+        "name": "chess-tasks"
+      }
+    },
+    {
+      "name": "engine-move",
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:engine-move",
+      "attributes": {
+        "chess": "chess",
+        "interval-ms": 1000
+      },
+      "ui_folder": {
+        "name": "chess-tasks"
+      }
+    },
+    {
+      "name": "home",
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:home",
+      "attributes": {
+        "chess": "chess"
+      },
+      "ui_folder": {
+        "name": "chess-tasks"
+      }
+    },
+    {
+      "name": "reset-board",
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:reset-board",
+      "attributes": {
+        "chess": "chess"
+      },
+      "ui_folder": {
+        "name": "chess-tasks"
+      }
+    },
+    {
+      "name": "chess-modes",
+      "api": "rdk:service:state_machine",
+      "model": "rdk:builtin:builtin",
+      "attributes": {
+        "initial": "start",
+        "cancel_timeout": "90s",
+        "on": {
+          "error": "error"
+        },
+        "states": {
+          "start": {
+            "initial": "wiping",
+            "on": {
+              "mode.vs_human": "vs_human",
+              "mode.vs_self": "vs_self"
+            },
+            "states": {
+              "wiping": {
+                "task": {
+                  "type": "do_command",
+                  "resource": "chess",
+                  "command": {
+                    "wipe": true
+                  }
+                },
+                "on": {
+                  "done": "watching"
+                }
+              },
+              "watching": {
+                "task": {
+                  "type": "resource",
+                  "name": "watch-board"
+                }
+              }
+            }
+          },
+          "vs_human": {
+            "initial": "waiting",
+            "on": {
+              "pause": "idle",
+              "mode.teaching": "teaching",
+              "mode.start": "start"
+            },
+            "states": {
+              "waiting": {
+                "task": {
+                  "type": "resource",
+                  "name": "wait-human-move",
+                  "input": {
+                    "side": "black"
+                  }
+                },
+                "on": {
+                  "moved": "replying",
+                  "engine_turn": "replying",
+                  "game_over": "game_over"
+                }
+              },
+              "replying": {
+                "task": {
+                  "type": "resource",
+                  "name": "engine-move",
+                  "input": {
+                    "side": "black"
+                  }
+                },
+                "on": {
+                  "done": "waiting",
+                  "game_over": "game_over"
+                }
+              }
+            }
+          },
+          "vs_self": {
+            "initial": "playing",
+            "on": {
+              "pause": "idle",
+              "mode.start": "start"
+            },
+            "states": {
+              "playing": {
+                "task": {
+                  "type": "resource",
+                  "name": "engine-move"
+                },
+                "on": {
+                  "done": "playing",
+                  "game_over": "game_over"
+                }
+              }
+            }
+          },
+          "teaching": {
+            "task": {
+              "type": "resource",
+              "name": "watch-board"
+            },
+            "on": {
+              "mode.vs_human": "vs_human",
+              "pause": "idle",
+              "mode.start": "start"
+            }
+          },
+          "idle": {
+            "task": {
+              "type": "resource",
+              "name": "watch-board"
+            },
+            "on": {
+              "resume": "$history",
+              "mode.vs_human": "vs_human",
+              "mode.vs_self": "vs_self",
+              "mode.teaching": "teaching",
+              "mode.start": "start"
+            }
+          },
+          "game_over": {
+            "task": {
+              "type": "resource",
+              "name": "watch-board"
+            },
+            "on": {
+              "mode.start": "start"
+            }
+          },
+          "error": {
+            "task": {
+              "type": "resource",
+              "name": "home"
+            },
+            "on": {
+              "error": "stuck",
+              "resume": "$history",
+              "mode.vs_human": "vs_human",
+              "mode.vs_self": "vs_self",
+              "mode.start": "start"
+            }
+          },
+          "stuck": {
+            "on": {
+              "mode.start": "start"
+            }
+          }
+        }
       },
       "ui_folder": {
         "name": "app"
@@ -153,6 +362,30 @@
               }
             ],
             "text": "wipe"
+          },
+          {
+            "key": 6,
+            "color": "blue",
+            "component": "chess",
+            "method": "do_command",
+            "args": [
+              {
+                "mode": 2
+              }
+            ],
+            "text": "vs human"
+          },
+          {
+            "key": 7,
+            "color": "blue",
+            "component": "chess",
+            "method": "do_command",
+            "args": [
+              {
+                "mode": 1
+              }
+            ],
+            "text": "pause"
           }
         ]
       },

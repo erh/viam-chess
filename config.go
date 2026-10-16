@@ -2,9 +2,9 @@ package viamchess
 
 import (
 	"fmt"
-	"time"
 
 	"go.viam.com/rdk/services/motion"
+	"go.viam.com/rdk/services/statemachine"
 )
 
 type ChessConfig struct {
@@ -33,9 +33,11 @@ type ChessConfig struct {
 
 	BadDiffMaxAttempts int `json:"bad-diff-max-attempts"` // default 10
 
-	// Board-loop cadence in ms. 0/unset disables the loop; board-snapshot
-	// then falls back to per-call captures.
-	BoardLoopIntervalMs int `json:"board-loop-interval-ms"`
+	// StateMachine is the name of the rdk:service:state_machine service that
+	// drives this robot's modes by running this module's tasks. Optional: the
+	// {"mode": N} and {"auto": bool} commands and the mode field need it;
+	// manual commands work without it.
+	StateMachine string `json:"state-machine,omitempty"`
 
 	// Companion UI timing overrides (ms). Omit or set 0 to use built-in defaults.
 	CompanionBadStateDelayMs    int `json:"companion-bad-state-delay-ms,omitempty"`
@@ -115,14 +117,6 @@ func (cfg *ChessConfig) badDiffMaxAttempts() int {
 	return cfg.BadDiffMaxAttempts
 }
 
-// boardLoopInterval returns 0 (disabled) for non-positive values.
-func (cfg *ChessConfig) boardLoopInterval() time.Duration {
-	if cfg.BoardLoopIntervalMs <= 0 {
-		return 0
-	}
-	return time.Duration(cfg.BoardLoopIntervalMs) * time.Millisecond
-}
-
 func (cfg *ChessConfig) companionBadStateDelayMs() int {
 	if cfg.CompanionBadStateDelayMs <= 0 {
 		return 60_000
@@ -184,6 +178,12 @@ func (cfg *ChessConfig) Validate(path string) ([]string, []string, error) {
 	// and the dep resolves.
 	if cfg.OnMoveTarget != "" {
 		optionalDeps = append(optionalDeps, "rdk:service:generic/"+cfg.OnMoveTarget)
+	}
+
+	// StateMachine is OPTIONAL for the same reason: its tasks depend on this
+	// service, so a hard dependency would be a cycle.
+	if cfg.StateMachine != "" {
+		optionalDeps = append(optionalDeps, statemachine.Named(cfg.StateMachine).String())
 	}
 
 	if cfg.CaptureDir != "" {

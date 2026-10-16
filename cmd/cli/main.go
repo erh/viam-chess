@@ -45,6 +45,7 @@ func realMain() error {
 	difficulty := flag.String("difficulty", "", "named difficulty for difficulty command: beginner, intermediate, advanced, expert, impossible")
 	elo := flag.Int("elo", 0, "numeric ELO for difficulty command (alternative to -difficulty)")
 	on := flag.Bool("on", false, "auto on/off for `auto` command")
+	mode := flag.Int("mode", -1, "mode for the `mode` command: 0 start, 1 pause, 2 vs human, 3 vs self, 4 teaching")
 	flag.Parse()
 
 	if *debug {
@@ -239,6 +240,25 @@ func realMain() error {
 		res, err := thing.DoCommand(ctx, map[string]interface{}{
 			"auto": *on,
 		})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "mode":
+		if *mode < 0 {
+			return fmt.Errorf("mode requires -mode <0-4>")
+		}
+		res, err := thing.DoCommand(ctx, map[string]interface{}{"mode": *mode})
+		if err != nil {
+			return err
+		}
+		logger.Infof("res: %v", res)
+		return nil
+
+	case "mode-status":
+		res, err := thing.DoCommand(ctx, map[string]interface{}{"mode-status": true})
 		if err != nil {
 			return err
 		}

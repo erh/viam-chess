@@ -14,12 +14,23 @@ that adds new capabilities ("models") to a robot running
 [Viam registry](https://docs.viam.com/registry/) and the models below become
 available to add to any machine.
 
-This module ships two models:
+This module ships two services and five tasks:
 
 | Model | API | What it is |
 | --- | --- | --- |
 | `erh:viam-chess:chess` | generic service | The brains. Tracks the game, talks to the chess engine, and drives the arm. You send it commands; it plays chess. |
 | `erh:viam-chess:piece-finder` | vision service | The eyes. Turns a camera frame into "what piece is on each square." The `chess` service depends on it. |
+| `erh:viam-chess:watch-board` | task | Keeps the board snapshot fresh while the robot is passive. Never returns on its own. |
+| `erh:viam-chess:wait-human-move` | task | Watches until the human has moved. Outcomes `moved`, `engine_turn`, `game_over`. |
+| `erh:viam-chess:engine-move` | task | Plays one engine move on the physical board. Outcomes `done`, `game_over`. |
+| `erh:viam-chess:home` | task | Homes the arm and opens the gripper. |
+| `erh:viam-chess:reset-board` | task | Physically returns every piece to its home square. |
+
+The robot's behavior — which task runs when, and what a button does — is not
+in this module's code. It is a **state machine** (Viam's built-in
+`rdk:service:state_machine`) whose states run the tasks above; see
+[Modes](#modes). [`examples/config1.json`](examples/config1.json) ships the
+machine this module was built around.
 
 > **New to Viam?** A few terms used below:
 > - **Component** — a piece of hardware (an `arm`, a `gripper`, a `camera`).
@@ -136,7 +147,7 @@ of the resource as configured elsewhere on the machine.
 | `graveyard-spacing-y` | float | `80.0` | spacing (mm) between graveyard rows; row 1 is one step off the board's a-file (white) or h-file (black), row 2 is two steps |
 | `gripper-open-pos` | float | `450.0` | gripper open position (servo units) |
 | `bad-diff-max-attempts` | int | `10` | retries when human-move detection sees a noisy "bad number of differences" |
-| `board-loop-interval-ms` | int | `0` (disabled) | cadence (ms) of the background board-scan loop; when disabled, `board-snapshot` falls back to a per-call camera capture |
+| `state-machine` | string | — | name of the `rdk:service:state_machine` that drives the modes (optional; without it only manual commands work and `mode` is always 0). See [Modes](#modes) |
 | `companion-bad-state-delay-ms` | int | `60000` | web-app companion: delay before showing a "board looks wrong" hint |
 | `companion-welcome-revive-ms` | int | `60000` | web-app companion: idle time before the welcome message reappears |
 | `companion-in-check-dismiss-ms` | int | `8000` | web-app companion: how long the "check" message stays up |
@@ -165,6 +176,50 @@ consumes this. Point `input` at a camera that is cropped to just the board.
     "input": "<cropped-camera>"
 }
 ```
+
+### Tasks
+
+Each task model takes the same attributes:
+
+| field | type | default | description |
+| --- | --- | --- | --- |
+| `chess` | string | — | name of the `chess` service the task drives (required; must be in this module) |
+| `interval-ms` | int | `1000` | how often a watching task (`watch-board`, `wait-human-move`, and `engine-move` while it waits for the board) looks at the board |
+
+Task inputs come from the state machine (`"input"` on the state's task):
+
+| task | input | meaning |
+| --- | --- | --- |
+| `wait-human-move` | `side` | `"black"` (or `"white"`): the robot's color. Returns `engine_turn` at once when it is that side's turn. |
+| `engine-move` | `side` | move only when it is this side's turn; otherwise `done` with `moved: false` |
+| `engine-move` | `sanity_check` | `true` to verify the board against the game before moving (the first move of a game always is) |
+
+Every outcome's output carries `fen`, `turn`, `outcome`, `method`, `is_over`
+and, after a move, `move`.
+
+### Modes
+
+A state machine service turns the tasks into a robot that plays by itself.
+The machine in `examples/config1.json` has these top-level states, which the
+`chess` service also reports as the legacy numeric `mode`:
+
+| state | mode | runs | leaves on |
+| --- | --- | --- | --- |
+| `start` | 0 | wipes the game, then `watch-board` | `mode.vs_human`, `mode.vs_self` |
+| `vs_human` | 2 | `wait-human-move` (as black) ⇄ `engine-move` | `pause`, `mode.teaching`, `mode.start`, game over |
+| `vs_self` | 3 | `engine-move` in a loop | `pause`, `mode.start`, game over |
+| `teaching` | 4 | `watch-board` | `mode.vs_human`, `pause`, `mode.start` |
+| `idle` | 1 | `watch-board` | `resume` (back to where it paused), `mode.*` |
+| `game_over` | 1 (`game_over: true`) | `watch-board` | `mode.start` |
+| `error` | 5 | `home` | `resume`, `mode.vs_human`, `mode.vs_self`, `mode.start` |
+
+Any task that fails with an execution fault (arm, gripper, engine) bubbles
+`error` to the machine level, which enters `error` and homes the arm. Drive
+the machine directly with its own API (`SendEvent`, `GetState`, `GetHistory`,
+`Stop`, `Reset`), or through the `chess` service's `{"mode": N}` and
+`{"auto": bool}` commands, which send the matching event. A pause lets the
+move in flight finish before the next state enters, so the machine's
+`cancel_timeout` is set generously (90 s).
 
 ### Engine strength
 
@@ -215,10 +270,12 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 | `clear-cache` | `true` | Clear only the square-position cache (forces re-scan from the next pointcloud capture). Use after physically nudging the board. |
 | `difficulty` | `<int>` | Change engine strength at runtime to a target Elo. See [Engine strength](#engine-strength). Returns `{"difficulty": <applied-elo>}`. |
 | `hover` | `"<sq>"` | Move the gripper to ~100 mm above the given square's pickup point and stay there. Does not return home. |
-| `auto` | `true` / `false` | Enable/disable the engine's automatic reply in the background board loop (detection and cache refresh still run when off). Returns `{"auto": <bool>}`. |
+| `mode` | `0`–`4` | Send the state machine the event for that mode (`0` start, `1` pause, `2` vs human, `3` vs self, `4` teaching); see [Modes](#modes). Errors if the machine has no transition for it from its current state. |
+| `mode-status` | `true` | Return `mode`, `mode_name`, `game_over`, `needs_fix`, and the machine's `state` path and `status`. No camera read. |
+| `auto` | `true` / `false` | Legacy: `true` starts (or resumes) `vs_human`, `false` pauses it. Returns `{"auto": <bool>}`. |
 | `set-announce` | `true` / `false` | Enable/disable dispatching `move_made` events to `on_move_target`. Returns `{"announce": <bool>}`. |
 | `play-fen` | `"<path>"` | Wipe state, then replay every move from a PGN file at the given path. |
-| `board-snapshot` | `true` | Return the current board state — see [Snapshot fields](#snapshot-fields). Served from a cache when the board loop is running. |
+| `board-snapshot` | `true` | Return the current board state — see [Snapshot fields](#snapshot-fields). Served from a cache while a watching task is running. |
 | `game-events` | `true` | Return just the game-state fields (no camera read): `event`, `outcome`, `method`, `turn`, `in_check`, `is_over`, `score_cp`, `score_mate`. |
 | `companion-config` | `true` | Return the web-app companion timing values: `bad_state_delay_ms`, `welcome_revive_ms`, `in_check_dismiss_ms`, `first_move_dismiss_ms`. |
 
@@ -231,7 +288,10 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 | `fen` | the engine's current position in FEN |
 | `camera_board` | what the camera currently sees per square |
 | `white_graveyard` / `black_graveyard` | FEN-letter contents of each graveyard |
-| `auto` | whether the engine auto-reply is enabled |
+| `mode` | the legacy mode number of the state machine's top-level state (every response carries it) |
+| `auto` | whether the robot is in `vs_human` |
+| `game_over` | whether the machine is parked in `game_over` |
+| `needs_fix` | the board cannot be reconciled with the game; a human should look |
 | `captured_at_ms` | capture time (Unix ms) |
 | `event` | highest-priority active event: `checkmate`, `stalemate`, `draw`, `check`, or `none` |
 | `outcome` | `in_progress`, `white_won`, `black_won`, or `draw` |
@@ -251,6 +311,7 @@ exactly one of the keys below per call. Squares are lowercase algebraic
 {"reset": true}
 {"undo": 2}
 {"difficulty": 1800}
+{"mode": 2}
 {"auto": true}
 {"play-fen": "data/sample.pgn"}
 {"board-snapshot": true}

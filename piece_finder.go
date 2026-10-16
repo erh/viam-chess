@@ -29,6 +29,7 @@ import (
 	"go.viam.com/rdk/spatialmath"
 	viz "go.viam.com/rdk/vision"
 	"go.viam.com/rdk/vision/classification"
+	"go.viam.com/rdk/vision/detection3d"
 	"go.viam.com/rdk/vision/objectdetection"
 	"go.viam.com/rdk/vision/viscapture"
 	"go.viam.com/utils/trace"
@@ -1049,11 +1050,15 @@ func (bc *PieceFinder) Name() resource.Name {
 	return bc.name
 }
 
+func (bc *PieceFinder) Status(ctx context.Context) (map[string]interface{}, error) {
+	return map[string]interface{}{}, nil
+}
+
 func (bc *PieceFinder) DetectionsFromCamera(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 	return nil, fmt.Errorf("DetectionsFromCamera not implemented")
 }
 
-func (bc *PieceFinder) Detections(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+func (bc *PieceFinder) Detections(ctx context.Context, img *camera.NamedImage, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 	return nil, fmt.Errorf("Detections not implemented")
 }
 
@@ -1061,8 +1066,12 @@ func (bc *PieceFinder) ClassificationsFromCamera(ctx context.Context, cameraName
 	return nil, fmt.Errorf("ClassificationsFromCamera not implemented")
 }
 
-func (bc *PieceFinder) Classifications(ctx context.Context, img image.Image, n int, extra map[string]interface{}) (classification.Classifications, error) {
+func (bc *PieceFinder) Classifications(ctx context.Context, img *camera.NamedImage, n int, extra map[string]interface{}) (classification.Classifications, error) {
 	return nil, fmt.Errorf("Classifications not implemented")
+}
+
+func (bc *PieceFinder) GetDetections3D(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*detection3d.Detection, error) {
+	return nil, fmt.Errorf("GetDetections3D not implemented")
 }
 
 func (bc *PieceFinder) GetObjectPointClouds(ctx context.Context, cameraName string, extra map[string]interface{}) ([]*viz.Object, error) {
@@ -1124,27 +1133,27 @@ func (bc *PieceFinder) CaptureAllFromCamera(ctx context.Context, cameraName stri
 	}
 
 	_, span2 := trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::Image")
-	var err error
-	ret.Image, err = ni[0].Image(ctx)
+	ret.Image = &ni[0]
+	img, err := ni[0].Image(ctx)
 	span2.End()
 	if err != nil {
 		return ret, err
 	}
 
 	_, span2 = trace.StartSpan(ctx, "PieceFinder::CaptureAllFromCamera::findBoardAndPieces")
-	squares, err := findBoardAndPieces(ctx, ret.Image, pc, bc.props, bc.logger, bc.conf.toClassifyConfig())
+	squares, err := findBoardAndPieces(ctx, img, pc, bc.props, bc.logger, bc.conf.toClassifyConfig())
 	span2.End()
 	if err != nil {
 		if extra != nil && extra["debug"] == true {
-			if err2 := rimage.SaveImage(ret.Image, "chess-debug.jpg"); err2 != nil {
+			if err2 := rimage.SaveImage(img, "chess-debug.jpg"); err2 != nil {
 				bc.logger.Errorf("failed to save debug image: %v", err2)
 			}
-			if corners, err2 := findBoard(ret.Image); err2 != nil {
+			if corners, err2 := findBoard(img); err2 != nil {
 				bc.logger.Errorf("failed to find corners for debug: %v", err2)
 			} else {
-				bounds := ret.Image.Bounds()
+				bounds := img.Bounds()
 				dst := image.NewRGBA(bounds)
-				draw.Draw(dst, bounds, ret.Image, image.Point{}, draw.Src)
+				draw.Draw(dst, bounds, img, image.Point{}, draw.Src)
 				red := color.RGBA{255, 0, 0, 255}
 				for _, corner := range corners {
 					drawRect(dst, image.Rect(corner.X-5, corner.Y-5, corner.X+5, corner.Y+5), red)

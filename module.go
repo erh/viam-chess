@@ -25,6 +25,7 @@ import (
 	"go.viam.com/rdk/robot/framesystem"
 	generic "go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/services/motion"
+	"go.viam.com/rdk/services/statemachine"
 	"go.viam.com/rdk/services/vision"
 
 	"github.com/corentings/chess/v2/uci"
@@ -77,10 +78,11 @@ type viamChessChess struct {
 	squareXY   map[string]r3.Vector
 	squareXYMu sync.RWMutex
 
-	// mode is the single source of truth for behavior. The board loop dispatches
-	// on it each tick; DoCommand changes it via a validated transition table.
-	// Zero value = START (no game). See mode.go.
-	mode modeMachine
+	// stateMachine drives behavior: its states run this module's tasks and
+	// its transitions are the mode table (see examples/config1.json). Optional
+	// so the dependency graph stays acyclic (the machine's tasks depend on this
+	// service); nil means manual commands only. See modes.go.
+	stateMachine statemachine.Service
 
 	// announceEnabled gates the on_move_target dispatch. Default true.
 	announceEnabled atomic.Bool
@@ -99,7 +101,7 @@ type viamChessChess struct {
 	lastScoreMate atomic.Int32
 
 	// boardCache holds the last camera-derived snapshot, populated by the
-	// board loop and read by board-snapshot. Guarded by mu.
+	// watching tasks and read by board-snapshot. Guarded by mu.
 	boardCache struct {
 		mu             sync.RWMutex
 		ready          bool
@@ -109,7 +111,7 @@ type viamChessChess struct {
 		blackGraveyard []interface{}
 		capturedAt     time.Time
 		gameEvents     GameEventsResult
-		// needsFix is set by the VS_HUMAN tick when the detected board can't be
+		// needsFix is set by the wait-human-move task when the detected board can't be
 		// mapped to a legal move (illegal/scrambled or a transient capture
 		// hiccup); cleared on the next clean detection. Surfaced as needs_fix so
 		// the companion app can prompt the human. Not an ERROR (see §7.4).
@@ -131,7 +133,7 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 
 	var err error
 
-	cancelCtx, cancelFunc := context.WithCancel(context.Background())
+	_, cancelFunc := context.WithCancel(context.Background())
 
 	s := &viamChessChess{
 		name:       name,
@@ -183,6 +185,17 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	}
 	s.announceEnabled.Store(true)
 
+	if conf.StateMachine != "" {
+		s.stateMachine, err = statemachine.FromProvider(deps, conf.StateMachine)
+		if err != nil {
+			// Optional dep: the machine's tasks depend on this service, so it
+			// comes up after us. AlwaysRebuild re-runs this constructor once it
+			// is available and the mode commands start working.
+			logger.Warnf("state-machine %q not yet available, mode commands disabled until rebuild: %v", conf.StateMachine, err)
+			s.stateMachine = nil
+		}
+	}
+
 	s.poseStart, err = toggleswitch.FromProvider(deps, conf.PoseStart)
 	if err != nil {
 		return nil, err
@@ -209,8 +222,6 @@ func NewChess(ctx context.Context, deps resource.Dependencies, name resource.Nam
 	if err != nil {
 		return nil, err
 	}
-
-	go s.runBoardLoop(cancelCtx)
 
 	err = s.engine.Run(uci.CmdUCI, uci.CmdIsReady, uci.CmdUCINewGame) // TODO: not sure this is correct
 	if err != nil {

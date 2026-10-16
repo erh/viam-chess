@@ -16,8 +16,37 @@
       "model": "erh:viam-chess:piece-finder",
       "short_description": "Vision service that reads a board camera frame into the piece on each square.",
       "markdown_link": "README.md#piece-finder-config"
+    },
+    {
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:watch-board",
+      "short_description": "Task: keeps the board snapshot fresh while the robot is passive. Never returns.",
+      "markdown_link": "README.md#tasks"
+    },
+    {
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:wait-human-move",
+      "short_description": "Task: watches the board until the human has moved (outcomes moved, engine_turn, game_over).",
+      "markdown_link": "README.md#tasks"
+    },
+    {
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:engine-move",
+      "short_description": "Task: plays one engine move on the physical board (outcomes done, game_over).",
+      "markdown_link": "README.md#tasks"
+    },
+    {
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:home",
+      "short_description": "Task: homes the arm and opens the gripper.",
+      "markdown_link": "README.md#tasks"
+    },
+    {
+      "api": "rdk:service:task",
+      "model": "erh:viam-chess:reset-board",
+      "short_description": "Task: physically returns every piece to its home square.",
+      "markdown_link": "README.md#tasks"
     }
-
   ],
   "applications": [
     {
