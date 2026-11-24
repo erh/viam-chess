@@ -760,7 +760,8 @@ by what you're trying to do:
   Permanent tooling; see [CLAUDE.md](../CLAUDE.md).
 - `make cli` builds `chesscli` for terminal-driven testing.
 - `GetHistory` on the state machine is the timeline: every transition with its
-  trigger and the task result that caused it.
+  trigger, what caused it and the task result, grouped by job (one job per run
+  from `start`, a new one on each `Reset`).
 - Sampling `board-snapshot` repeatedly is the cheapest way to measure perception
   stability: the watching task refreshes the cache each scan, so consecutive
   polls at the scan interval are independent captures. Identical readings across samples mean
